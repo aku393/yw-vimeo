@@ -32,6 +32,7 @@ from telethon.errors import FloodWaitError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
 from telegram.constants import ParseMode, ChatAction
+import nest_asyncio
 
 # Load environment variables
 load_dotenv()
@@ -504,11 +505,11 @@ async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text
                     return await obj.edit_message_text(
                         escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
                     )
-                except Exception:
-                    if obj.message:
-                        return await obj.message.reply_text(
-                            escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
-                        )
+                    except Exception:
+                        if obj.message:
+                            return await obj.message.reply_text(
+                                escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
+                            )
 
             elif isinstance(obj, Message):
                 try:
@@ -971,4 +972,5 @@ async def main():
     await application.run_polling()
 
 if __name__ == "__main__":
+    nest_asyncio.apply()
     asyncio.run(main())
