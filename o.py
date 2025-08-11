@@ -53,7 +53,24 @@ def format_size(size_bytes: int) -> str:
 def escape_markdown(text: str) -> str:
     """Helper function to escape special Markdown v2 characters."""
     # This pattern matches all characters that need to be escaped in Markdown V2.
-    return re.sub(r'([_*[\]()~`>#+\-=|{}.!])', r'\\\1', text)
+    escape_chars = r'([_*[\]()~`>#+\-=|{}.!])'
+    return re.sub(escape_chars, r'\\\1', text)
+
+async def send_markdown_message(update: Update, text: str, reply_markup=None):
+    """Helper function to send properly escaped MarkdownV2 messages."""
+    escaped_text = escape_markdown(text)
+    if isinstance(update, Update):
+        await update.message.reply_text(
+            escaped_text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=reply_markup
+        )
+    else:  # For CallbackQuery
+        await update.edit_message_text(
+            escaped_text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=reply_markup
+        )
 
 # Validate required environment variables
 if not BOT_TOKEN or not API_ID or not API_HASH:
@@ -259,18 +276,18 @@ def check_n_m3u8dl_re():
 async def start(update: Update, context: CallbackContext):
     """Start command handler."""
     welcome_text = """
-🎥 *Vimeo Downloader Bot*
+🎥 Vimeo Downloader Bot
 
-Send me a Vimeo playlist\\.json URL and I'll download and convert it to MP4 for you\\!
+Send me a Vimeo playlist.json URL and I'll download and convert it to MP4 for you!
 
 *Features:*
 ✅ Downloads Vimeo videos
 ✅ Converts MKV to MP4 automatically
-✅ Supports large file uploads \\(up to 4GB for Premium users\\)
+✅ Supports large file uploads (up to 4GB for Premium users)
 ✅ Smart file size detection
 
 *Usage:*
-Just send me the Vimeo playlist\\.json URL and I'll handle the rest\\!
+Just send me the Vimeo playlist.json URL and I'll handle the rest!
 
 *File Limits:*
 • Free users: Up to 2GB
@@ -283,25 +300,21 @@ Just send me the Vimeo playlist\\.json URL and I'll handle the rest\\!
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
-        welcome_text,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=reply_markup
-    )
+    await send_markdown_message(update, welcome_text, reply_markup)
 
 
 async def help_command(update: Update, context: CallbackContext):
     """Help command handler."""
     help_text = """
-🆘 *How to use this bot:*
+🆘 How to use this bot:
 
-1️⃣ Copy your Vimeo playlist\\.json URL
+1️⃣ Copy your Vimeo playlist.json URL
 2️⃣ Send it to me
 3️⃣ Wait for the download and conversion
-4️⃣ Receive your MP4 file\\!
+4️⃣ Receive your MP4 file!
 
 *Supported URLs:*
-• Vimeo playlist\\.json URLs
+• Vimeo playlist.json URLs
 • Must be valid and accessible
 
 *Requirements:*
@@ -312,30 +325,30 @@ async def help_command(update: Update, context: CallbackContext):
 • Free users: 2GB max file size
 • Premium users: 4GB max file size
 
-If you encounter any issues, contact the bot administrator\\.
+If you encounter any issues, contact the bot administrator.
     """
     
-    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
+    await send_markdown_message(update, help_text)
 
 
 async def admin_command(update: Update, context: CallbackContext):
     """Admin only command to check bot status."""
     if ADMIN_USER_ID and update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ You don't have permission to use this command.")
+        await send_markdown_message(update, "❌ You don't have permission to use this command.")
         return
     
-    status_text = "🔧 *Admin Status Panel:*\n\n"
+    status_text = "🔧 Admin Status Panel:\n\n"
     status_text += f"🤖 Bot Token: {'✅ Set' if BOT_TOKEN else '❌ Missing'}\n"
     status_text += f"🔑 API ID: {'✅ Set' if API_ID else '❌ Missing'}\n"
     status_text += f"🔒 API Hash: {'✅ Set' if API_HASH else '❌ Missing'}\n"
     status_text += f"🛠️ FFmpeg: {'✅ Available' if check_ffmpeg() else '❌ Missing'}\n"
     status_text += f"📡 Telethon: {'✅ Connected' if telethon_client and telethon_client.is_connected() else '❌ Disconnected'}\n"
-    status_text += f"📁 N\\_m3u8DL-RE: {'✅ Found' if os.path.exists(N_M3U8DL_RE_PATH) else '❌ Missing'}\n\n"
-    status_text += f"📊 *Limits:*\n"
+    status_text += f"📁 N_m3u8DL-RE: {'✅ Found' if os.path.exists(N_M3U8DL_RE_PATH) else '❌ Missing'}\n\n"
+    status_text += f"📊 Limits:\n"
     status_text += f"• Free users: {format_size(FREE_USER_LIMIT)}\n"
     status_text += f"• Premium users: {format_size(PREMIUM_USER_LIMIT)}\n"
     
-    await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN_V2)
+    await send_markdown_message(update, status_text)
 
 
 async def button_handler(update: Update, context: CallbackContext):
@@ -346,12 +359,12 @@ async def button_handler(update: Update, context: CallbackContext):
     if query.data == "help":
         await help_command(query, context)
     elif query.data == "status":
-        status_text = "🤖 *Bot Status:*\n\n"
+        status_text = "🤖 Bot Status:\n\n"
         status_text += f"✅ Bot is running\n"
         status_text += f"{'✅' if check_ffmpeg() else '❌'} FFmpeg available\n"
         status_text += f"{'✅' if telethon_client and telethon_client.is_connected() else '❌'} Telethon connected\n"
         
-        await query.edit_message_text(status_text, parse_mode=ParseMode.MARKDOWN_V2)
+        await send_markdown_message(query, status_text)
 
 
 async def process_vimeo_url(update: Update, context: CallbackContext):
@@ -361,18 +374,15 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
     
     # Validate URL
     if not url.startswith('https://') or 'playlist.json' not in url:
-        await update.message.reply_text(
-            "❌ Invalid URL\\! Please send a valid Vimeo playlist\\.json URL\\.",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+        await send_markdown_message(update, "❌ Invalid URL! Please send a valid Vimeo playlist.json URL.")
         return
     
     # Check if N_m3u8DL-RE is available
     if not check_n_m3u8dl_re():
-        await update.message.reply_text(
-            f"❌ N\\_m3u8DL-RE not found at: `{escape_markdown(N_M3U8DL_RE_PATH)}`\n\n"
-            "Please ensure N\\_m3u8DL-RE is properly installed and the path in \\.env is correct\\.",
-            parse_mode=ParseMode.MARKDOWN_V2
+        await send_markdown_message(
+            update,
+            f"❌ N_m3u8DL-RE not found at: {N_M3U8DL_RE_PATH}\n\n"
+            "Please ensure N_m3u8DL-RE is properly installed and the path in .env is correct."
         )
         return
     
@@ -380,11 +390,11 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
     is_premium = await get_user_info(user_id)
     file_limit = get_file_size_limit(is_premium)
     
-    status_msg = await update.message.reply_text(
-        f"🔄 Processing your request\\.\n"
+    status_msg = await send_markdown_message(
+        update,
+        f"🔄 Processing your request.\n"
         f"👤 User: {'Premium' if is_premium else 'Free'}\n"
-        f"📏 File limit: {format_size(file_limit)}",
-        parse_mode=ParseMode.MARKDOWN_V2
+        f"📏 File limit: {format_size(file_limit)}"
     )
     
     # Create temporary directory with custom prefix
@@ -396,20 +406,20 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
             # Download and process
             downloader = VimeoDownloader(url, temp_dir)
             
-            await status_msg.edit_text("🔄 Fetching playlist information\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            await send_markdown_message(status_msg, "🔄 Fetching playlist information.")
             
             if not downloader.send_request():
-                await status_msg.edit_text("❌ Failed to fetch playlist\\. Check your URL\\.", parse_mode=ParseMode.MARKDOWN_V2)
+                await send_markdown_message(status_msg, "❌ Failed to fetch playlist. Check your URL.")
                 return
                 
             if not downloader.parse_playlist():
-                await status_msg.edit_text("❌ Failed to parse playlist\\.", parse_mode=ParseMode.MARKDOWN_V2)
+                await send_markdown_message(status_msg, "❌ Failed to parse playlist.")
                 return
             
-            await status_msg.edit_text("🔄 Creating download playlists\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            await send_markdown_message(status_msg, "🔄 Creating download playlists.")
             master_file, streams = downloader.save_media()
             
-            await status_msg.edit_text("🔄 Starting download\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            await send_markdown_message(status_msg, "🔄 Starting download.")
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
             
             # Download using N_m3u8DL-RE
@@ -421,13 +431,16 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                     "--workDir", temp_dir
                 ], check=True, capture_output=True)
             except subprocess.CalledProcessError as e:
-                await status_msg.edit_text(f"❌ Download failed: {escape_markdown(e.stderr.decode())}", parse_mode=ParseMode.MARKDOWN_V2)
+                await send_markdown_message(
+                    status_msg, 
+                    f"❌ Download failed: {e.stderr.decode() if e.stderr else 'Unknown error'}"
+                )
                 return
             
             # Find downloaded MKV file
             mkv_files = glob.glob(os.path.join(temp_dir, "*.mkv"))
             if not mkv_files:
-                await status_msg.edit_text("❌ No MKV file found after download\\.", parse_mode=ParseMode.MARKDOWN_V2)
+                await send_markdown_message(status_msg, "❌ No MKV file found after download.")
                 return
             
             mkv_path = Path(mkv_files[0])
@@ -437,15 +450,18 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
             file_size = mkv_path.stat().st_size
             if file_size > file_limit:
                 message_text = (
-                    f"❌ File too large\\!\n"
+                    f"❌ File too large!\n"
                     f"File size: {format_size(file_size)}\n"
                     f"Your limit: {format_size(file_limit)}\n"
                     f"{'Consider upgrading to Premium!' if not is_premium else 'File exceeds Premium limit!'}"
                 )
-                await status_msg.edit_text(message_text, parse_mode=ParseMode.MARKDOWN_V2)
+                await send_markdown_message(status_msg, message_text)
                 return
             
-            await status_msg.edit_text(f"🔄 Converting to MP4\\.\\. \\({format_size(file_size)}\\)", parse_mode=ParseMode.MARKDOWN_V2)
+            await send_markdown_message(
+                status_msg, 
+                f"🔄 Converting to MP4... ({format_size(file_size)})"
+            )
             
             # Convert MKV to MP4
             if check_ffmpeg():
@@ -454,13 +470,13 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                     mkv_path.unlink()
                     final_file = mp4_path
                 else:
-                    await status_msg.edit_text("⚠️ Conversion failed, uploading MKV file\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
+                    await send_markdown_message(status_msg, "⚠️ Conversion failed, uploading MKV file...")
                     final_file = mkv_path
             else:
-                await status_msg.edit_text("⚠️ FFmpeg not available, uploading MKV file\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
+                await send_markdown_message(status_msg, "⚠️ FFmpeg not available, uploading MKV file...")
                 final_file = mkv_path
             
-            await status_msg.edit_text("🔄 Uploading file\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            await send_markdown_message(status_msg, "🔄 Uploading file...")
             
             # Upload file
             final_size = final_file.stat().st_size
@@ -468,17 +484,19 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
             # Use Telethon for files > 50MB, regular bot API for smaller files
             if final_size > 50 * 1024 * 1024 and telethon_client and telethon_client.is_connected():
                 try:
-                    await status_msg.edit_text("🔄 Uploading large file via Telethon\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
+                    await send_markdown_message(status_msg, "🔄 Uploading large file via Telethon...")
                     await telethon_client.send_file(
                         update.effective_chat.id,
                         final_file,
-                        caption=f"📹 Video downloaded and converted\\!\n"
-                                f"📊 Size: {format_size(final_size)}\n"
-                                f"👤 User: {'Premium' if is_premium else 'Free'}",
+                        caption=escape_markdown(
+                            f"📹 Video downloaded and converted!\n"
+                            f"📊 Size: {format_size(final_size)}\n"
+                            f"👤 User: {'Premium' if is_premium else 'Free'}"
+                        )
                     )
                 except Exception as e:
                     logger.error(f"Telethon upload failed: {e}")
-                    await status_msg.edit_text("❌ Upload failed via Telethon\\. File might be too large\\.", parse_mode=ParseMode.MARKDOWN_V2)
+                    await send_markdown_message(status_msg, "❌ Upload failed via Telethon. File might be too large.")
                     return
             else:
                 # Use regular bot API
@@ -487,17 +505,19 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                         await context.bot.send_document(
                             chat_id=update.effective_chat.id,
                             document=f,
-                            caption=f"📹 Video downloaded and converted\\!\n"
-                                    f"📊 Size: {format_size(final_size)}\n"
-                                    f"👤 User: {'Premium' if is_premium else 'Free'}",
+                            caption=escape_markdown(
+                                f"📹 Video downloaded and converted!\n"
+                                f"📊 Size: {format_size(final_size)}\n"
+                                f"👤 User: {'Premium' if is_premium else 'Free'}"
+                            ),
                             filename=final_file.name
                         )
                 except Exception as e:
                     logger.error(f"Bot API upload failed: {e}")
-                    await status_msg.edit_text("❌ Upload failed\\. File might be too large for bot API\\.", parse_mode=ParseMode.MARKDOWN_V2)
+                    await send_markdown_message(status_msg, "❌ Upload failed. File might be too large for bot API.")
                     return
             
-            await status_msg.edit_text("✅ Complete\\! File uploaded successfully\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            await send_markdown_message(status_msg, "✅ Complete! File uploaded successfully.")
             
             # Cleanup temp files
             for stream in streams:
@@ -513,7 +533,7 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                 
         except Exception as e:
             logger.error(f"Processing error: {e}")
-            await status_msg.edit_text(f"❌ An error occurred: {escape_markdown(str(e))}", parse_mode=ParseMode.MARKDOWN_V2)
+            await send_markdown_message(status_msg, f"❌ An error occurred: {str(e)}")
     finally:
         # Clean up temporary directory
         try:
