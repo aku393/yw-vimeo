@@ -307,6 +307,22 @@ async def admin_command(update: Update, context: CallbackContext):
     status_text += f"• Premium users: {format_size(PREMIUM_USER_LIMIT)}\n"
     
     await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+
+
+async def button_handler(update: Update, context: CallbackContext):
+    """Handle inline keyboard button presses."""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "help":
+        await help_command(query, context)
+    elif query.data == "status":
+        status_text = "🤖 **Bot Status:**\n\n"
+        status_text += f"✅ Bot is running\n"
+        status_text += f"{'✅' if check_ffmpeg() else '❌'} FFmpeg available\n"
+        status_text += f"{'✅' if telethon_client and telethon_client.is_connected() else '❌'} Telethon connected\n"
+        
+        await query.edit_message_text(status_text, parse_mode=ParseMode.MARKDOWN)
     """Handle inline keyboard button presses."""
     query = update.callback_query
     await query.answer()
