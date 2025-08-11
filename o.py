@@ -8,10 +8,23 @@ import shutil
 import time
 import glob
 import re
+import threading
+import queue
+import psutil
+import platform
+import speedtest
+import sqlite3
+from datetime import datetime, timedelta
+from collections import defaultdict
+import hashlib
 from base64 import b64decode
 from pathlib import Path
 from urllib.parse import urljoin
-from typing import Optional, Union
+from typing import Optional, Union, Dict, List, Tuple
+import concurrent.futures
+from dataclasses import dataclass, field
+import aiofiles
+import aiohttp
 
 import requests
 from dotenv import load_dotenv
@@ -24,7 +37,7 @@ from telegram.constants import ParseMode, ChatAction
 # Load environment variables
 load_dotenv()
 
-# Configuration from environment variables
+# Enhanced Configuration from environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH")
@@ -39,104 +52,554 @@ PREMIUM_USER_LIMIT = int(os.getenv("PREMIUM_LIMIT_GB", "4")) * 1024 * 1024 * 102
 N_M3U8DL_RE_PATH = os.getenv("N_M3U8DL_RE_PATH", "./N_m3u8DL-RE")
 TEMP_DIR_PREFIX = os.getenv("TEMP_DIR_PREFIX", "vimeo_bot_temp_")
 
+# Enhanced Configuration
+MAX_CONCURRENT_DOWNLOADS = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "5"))
+PROGRESS_UPDATE_INTERVAL = float(os.getenv("PROGRESS_UPDATE_INTERVAL", "2.0"))
+DB_PATH = os.getenv("DB_PATH", "vimeo_bot.db")
+ANALYTICS_ENABLED = os.getenv("ANALYTICS_ENABLED", "true").lower() == "true"
+CACHE_SIZE = int(os.getenv("CACHE_SIZE", "100"))
+
+@dataclass
+class DownloadStats:
+    """Statistics for download operations"""
+    start_time: float = field(default_factory=time.time)
+    bytes_downloaded: int = 0
+    total_bytes: int = 0
+    speed_mbps: float = 0.0
+    eta_seconds: int = 0
+    stage: str = "Initializing"
+    error_count: int = 0
+    last_update: float = field(default_factory=time.time)
+    current_segment: int = 0
+    total_segments: int = 0
+    peak_speed: float = 0.0
+
+@dataclass
+class UserSession:
+    """User session data"""
+    user_id: int
+    username: str
+    is_premium: bool
+    downloads_today: int = 0
+    total_downloads: int = 0
+    bytes_downloaded_today: int = 0
+    last_active: datetime = field(default_factory=datetime.now)
+    current_downloads: int = 0
+    favorite_quality: str = "highest"
+    notification_preferences: Dict = field(default_factory=dict)
+
+class PerformanceMonitor:
+    """System performance monitoring with advanced metrics"""
+    def __init__(self):
+        self.start_time = time.time()
+        self.stats_history = []
+        self.max_history = 100
+        self.peak_concurrent = 0
+        self.total_processed = 0
+        self.error_count = 0
+        
+    def get_system_stats(self) -> Dict:
+        """Get current system statistics"""
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        network = psutil.net_io_counters()
+        
+        # Get process-specific stats
+        current_process = psutil.Process()
+        process_memory = current_process.memory_info()
+        
+        return {
+            'cpu_percent': cpu_percent,
+            'memory_percent': memory.percent,
+            'memory_available_gb': memory.available / (1024**3),
+            'disk_free_gb': disk.free / (1024**3),
+            'network_sent_mb': network.bytes_sent / (1024**2),
+            'network_recv_mb': network.bytes_recv / (1024**2),
+            'uptime_hours': (time.time() - self.start_time) / 3600,
+            'process_memory_mb': process_memory.rss / (1024**2),
+            'open_files': len(current_process.open_files()),
+            'threads': current_process.num_threads(),
+            'connections': len(current_process.connections()) if hasattr(current_process, 'connections') else 0
+        }
+    
+    def add_stats(self):
+        """Add current stats to history"""
+        stats = self.get_system_stats()
+        stats['timestamp'] = time.time()
+        stats['active_downloads'] = len(active_downloads)
+        self.stats_history.append(stats)
+        
+        # Track peak concurrent downloads
+        if stats['active_downloads'] > self.peak_concurrent:
+            self.peak_concurrent = stats['active_downloads']
+        
+        if len(self.stats_history) > self.max_history:
+            self.stats_history.pop(0)
+    
+    def get_average_stats(self, minutes: int = 5) -> Dict:
+        """Get average statistics over the last N minutes"""
+        cutoff_time = time.time() - (minutes * 60)
+        recent_stats = [s for s in self.stats_history if s['timestamp'] > cutoff_time]
+        
+        if not recent_stats:
+            return self.get_system_stats()
+        
+        avg_stats = {}
+        for key in recent_stats[0].keys():
+            if key != 'timestamp' and isinstance(recent_stats[0][key], (int, float)):
+                avg_stats[key] = sum(s[key] for s in recent_stats) / len(recent_stats)
+        
+        return avg_stats
+
+class DatabaseManager:
+    """Enhanced database management with advanced analytics"""
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.init_database()
+    
+    def init_database(self):
+        """Initialize database with enhanced schema"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    is_premium BOOLEAN DEFAULT FALSE,
+                    total_downloads INTEGER DEFAULT 0,
+                    total_bytes_downloaded INTEGER DEFAULT 0,
+                    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    preferred_quality TEXT DEFAULT 'highest',
+                    language_code TEXT,
+                    timezone TEXT,
+                    banned BOOLEAN DEFAULT FALSE,
+                    ban_reason TEXT
+                )
+            ''')
+            
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS downloads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    url TEXT,
+                    title TEXT,
+                    file_size INTEGER,
+                    download_speed REAL,
+                    conversion_time REAL,
+                    quality TEXT,
+                    format TEXT,
+                    start_time TIMESTAMP,
+                    end_time TIMESTAMP,
+                    status TEXT,
+                    error_message TEXT,
+                    server_location TEXT,
+                    user_ip TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id)
+                )
+            ''')
+            
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS system_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    cpu_percent REAL,
+                    memory_percent REAL,
+                    disk_free_gb REAL,
+                    active_downloads INTEGER,
+                    total_downloads_today INTEGER,
+                    network_sent_mb REAL,
+                    network_recv_mb REAL,
+                    error_count INTEGER DEFAULT 0
+                )
+            ''')
+            
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS error_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    user_id INTEGER,
+                    error_type TEXT,
+                    error_message TEXT,
+                    traceback TEXT,
+                    url TEXT,
+                    resolved BOOLEAN DEFAULT FALSE
+                )
+            ''')
+            
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS bot_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+    
+    def update_user(self, user_id: int, username: str, first_name: str, 
+                   last_name: str, is_premium: bool, language_code: str = None):
+        """Update or insert user information"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute('''
+                INSERT OR REPLACE INTO users 
+                (user_id, username, first_name, last_name, is_premium, language_code, last_seen) 
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (user_id, username, first_name, last_name, is_premium, language_code))
+    
+    def log_download(self, user_id: int, url: str, title: str, file_size: int, 
+                    download_speed: float, quality: str, format_type: str, 
+                    status: str, error_message: str = None, conversion_time: float = 0):
+        """Log download statistics with enhanced data"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute('''
+                INSERT INTO downloads 
+                (user_id, url, title, file_size, download_speed, conversion_time, 
+                 quality, format, start_time, end_time, status, error_message)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-1 hour'), CURRENT_TIMESTAMP, ?, ?)
+            ''', (user_id, url, title, file_size, download_speed, conversion_time, 
+                  quality, format_type, status, error_message))
+    
+    def log_error(self, user_id: int, error_type: str, error_message: str, 
+                  traceback: str = None, url: str = None):
+        """Log error information"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute('''
+                INSERT INTO error_logs 
+                (user_id, error_type, error_message, traceback, url)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (user_id, error_type, error_message, traceback, url))
+    
+    def get_user_stats(self, user_id: int) -> Dict:
+        """Get comprehensive user statistics"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('''
+                SELECT 
+                    COUNT(*) as total_downloads,
+                    COALESCE(SUM(file_size), 0) as total_bytes,
+                    COALESCE(AVG(download_speed), 0) as avg_speed,
+                    COALESCE(MAX(download_speed), 0) as max_speed,
+                    COUNT(CASE WHEN status = 'completed' THEN 1 END) as successful_downloads,
+                    COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_downloads,
+                    COUNT(CASE WHEN date(start_time) = date('now') THEN 1 END) as downloads_today,
+                    COALESCE(SUM(CASE WHEN date(start_time) = date('now') THEN file_size ELSE 0 END), 0) as bytes_today
+                FROM downloads 
+                WHERE user_id = ?
+            ''', (user_id,))
+            
+            result = cursor.fetchone()
+            stats = dict(zip([col[0] for col in cursor.description], result))
+            
+            # Calculate success rate
+            total = stats['total_downloads']
+            if total > 0:
+                stats['success_rate'] = (stats['successful_downloads'] / total) * 100
+            else:
+                stats['success_rate'] = 0
+                
+            return stats
+    
+    def get_global_stats(self) -> Dict:
+        """Get comprehensive global bot statistics"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('''
+                SELECT 
+                    COUNT(DISTINCT user_id) as total_users,
+                    COUNT(*) as total_downloads,
+                    COALESCE(SUM(file_size), 0) as total_bytes_served,
+                    COUNT(CASE WHEN status = 'completed' THEN 1 END) as successful_downloads,
+                    COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_downloads,
+                    COALESCE(AVG(download_speed), 0) as avg_download_speed,
+                    COUNT(CASE WHEN date(start_time) = date('now') THEN 1 END) as downloads_today,
+                    COUNT(CASE WHEN datetime(start_time) > datetime('now', '-1 hour') THEN 1 END) as downloads_last_hour
+                FROM downloads
+            ''')
+            
+            result = cursor.fetchone()
+            stats = dict(zip([col[0] for col in cursor.description], result))
+            
+            # Get premium user count
+            cursor = conn.execute('SELECT COUNT(*) FROM users WHERE is_premium = TRUE')
+            stats['premium_users'] = cursor.fetchone()[0]
+            
+            # Calculate global success rate
+            total = stats['total_downloads']
+            if total > 0:
+                stats['success_rate'] = (stats['successful_downloads'] / total) * 100
+            else:
+                stats['success_rate'] = 0
+                
+            return stats
+    
+    def get_top_users(self, limit: int = 10) -> List[Tuple]:
+        """Get top users by download count and data usage"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('''
+                SELECT u.username, u.first_name, u.is_premium,
+                       COUNT(d.id) as downloads, 
+                       COALESCE(SUM(d.file_size), 0) as total_bytes,
+                       COALESCE(AVG(d.download_speed), 0) as avg_speed
+                FROM users u
+                LEFT JOIN downloads d ON u.user_id = d.user_id AND d.status = 'completed'
+                GROUP BY u.user_id
+                HAVING downloads > 0
+                ORDER BY downloads DESC, total_bytes DESC
+                LIMIT ?
+            ''', (limit,))
+            return cursor.fetchall()
+    
+    def get_download_trends(self, days: int = 7) -> Dict:
+        """Get download trends over the last N days"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('''
+                SELECT 
+                    date(start_time) as download_date,
+                    COUNT(*) as daily_downloads,
+                    COUNT(DISTINCT user_id) as daily_users,
+                    COALESCE(SUM(file_size), 0) as daily_bytes
+                FROM downloads
+                WHERE start_time >= date('now', '-{} days')
+                GROUP BY date(start_time)
+                ORDER BY download_date
+            '''.format(days))
+            
+            trends = []
+            for row in cursor.fetchall():
+                trends.append({
+                    'date': row[0],
+                    'downloads': row[1],
+                    'users': row[2],
+                    'bytes': row[3]
+                })
+            
+            return trends
+
+# Global instances
+performance_monitor = PerformanceMonitor()
+db_manager = DatabaseManager(DB_PATH)
+active_downloads: Dict[int, DownloadStats] = {}
+user_sessions: Dict[int, UserSession] = {}
+download_queue = asyncio.Queue(maxsize=MAX_CONCURRENT_DOWNLOADS * 2)
+progress_tasks: Dict[int, asyncio.Task] = {}
+
 def format_size(size_bytes: int) -> str:
-    """Format file size in human readable format."""
-    if size_bytes < 1024:
+    """Format file size in human readable format with more precision"""
+    if size_bytes == 0:
+        return "0 B"
+    elif size_bytes < 1024:
         return f"{size_bytes} B"
     elif size_bytes < 1024**2:
         return f"{size_bytes/1024:.1f} KB"
     elif size_bytes < 1024**3:
         return f"{size_bytes/(1024**2):.1f} MB"
     else:
-        return f"{size_bytes/(1024**3):.1f} GB"
+        return f"{size_bytes/(1024**3):.2f} GB"
+
+def format_speed(bytes_per_sec: float) -> str:
+    """Format download speed with dynamic units"""
+    if bytes_per_sec == 0:
+        return "0 B/s"
+    elif bytes_per_sec < 1024:
+        return f"{bytes_per_sec:.1f} B/s"
+    elif bytes_per_sec < 1024**2:
+        return f"{bytes_per_sec/1024:.1f} KB/s"
+    elif bytes_per_sec < 1024**3:
+        return f"{bytes_per_sec/(1024**2):.2f} MB/s"
+    else:
+        return f"{bytes_per_sec/(1024**3):.3f} GB/s"
+
+def format_time(seconds: int) -> str:
+    """Format time duration with better precision"""
+    if seconds <= 0:
+        return "0s"
+    elif seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        minutes = seconds // 60
+        remaining_seconds = seconds % 60
+        return f"{minutes}m {remaining_seconds}s" if remaining_seconds > 0 else f"{minutes}m"
+    else:
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        return f"{hours}h {minutes}m" if minutes > 0 else f"{hours}h"
+
+def create_progress_bar(progress: float, length: int = 25, style: str = "blocks") -> str:
+    """Create enhanced visual progress bar with different styles"""
+    progress = max(0, min(1, progress))  # Clamp between 0 and 1
+    filled = int(length * progress)
+    
+    if style == "blocks":
+        full_block = "█"
+        empty_block = "░"
+        bar = full_block * filled + empty_block * (length - filled)
+    elif style == "arrows":
+        full_block = "▶"
+        empty_block = "▷"
+        bar = full_block * filled + empty_block * (length - filled)
+    elif style == "circles":
+        full_block = "●"
+        empty_block = "○"
+        bar = full_block * filled + empty_block * (length - filled)
+    else:  # default to blocks
+        full_block = "█"
+        empty_block = "░"
+        bar = full_block * filled + empty_block * (length - filled)
+    
+    percentage = f"{progress*100:.1f}%"
+    return f"{bar} {percentage}"
 
 def escape_markdown(text: str) -> str:
-    """Helper function to escape special Markdown v2 characters."""
-    # This pattern matches characters that should be escaped in Markdown V2.
-    escape_chars = r'([_*[\]()~`>#+\-=|{}.!])'
-    return re.sub(escape_chars, r'\\\1', text)
+    """Enhanced markdown escaping for Telegram MarkdownV2"""
+    if not text:
+        return ""
+    
+    # Characters that need to be escaped in MarkdownV2
+    escape_chars = r'([_*[\]()~`>#+\-=|{}.!\\])'
+    escaped = re.sub(escape_chars, r'\\\1', str(text))
+    return escaped
 
-async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text: str, reply_markup=None):
-    """
-    Send or edit a MarkdownV2 message depending on the object type.
-    Accepts Update, Message, or CallbackQuery.
-    Returns the resulting Message object (when possible) or None.
-    """
-    escaped_text = escape_markdown(text)
-    try:
-        # Update with a message (regular incoming message)
-        if isinstance(obj, Update):
-            if obj.callback_query:
-                # CallbackQuery inside Update
-                cq = obj.callback_query
+def generate_random_tips() -> str:
+    """Generate random tips for users"""
+    tips = [
+        "💡 Tip: Premium users get faster upload speeds and larger file limits!",
+        "🔥 Tip: Use /speedtest to check your connection before large downloads!",
+        "⚡ Tip: The bot automatically retries failed downloads up to 3 times!",
+        "🎯 Tip: Higher quality videos take longer to download but are worth it!",
+        "📊 Tip: Check /stats to see your download history and achievements!",
+        "🏆 Tip: Compete with other users on the /leaderboard!",
+        "💾 Tip: Files are automatically cleaned up after successful uploads!",
+        "🔄 Tip: The bot converts MKV to MP4 for better compatibility!",
+        "📱 Tip: You can download up to {} concurrent videos!".format(MAX_CONCURRENT_DOWNLOADS),
+        "🌟 Tip: Premium detection is automatic - no setup required!"
+    ]
+    return tips[int(time.time()) % len(tips)]
+
+async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text: str, 
+                               reply_markup=None, parse_mode=ParseMode.MARKDOWN_V2) -> Optional[Message]:
+    """Enhanced message sending with comprehensive error handling and fallbacks"""
+    if not text:
+        return None
+        
+    escaped_text = escape_markdown(text) if parse_mode == ParseMode.MARKDOWN_V2 else text
+    
+    # Truncate message if too long (Telegram limit is 4096 characters)
+    if len(escaped_text) > 4000:
+        escaped_text = escaped_text[:3950] + "\n\n\\.\\.\\. \\(message truncated\\)"
+    
+    max_retries = 3
+    retry_delay = 1
+    
+    for attempt in range(max_retries):
+        try:
+            if isinstance(obj, Update):
+                if obj.callback_query:
+                    try:
+                        return await obj.callback_query.edit_message_text(
+                            escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
+                        )
+                    except Exception:
+                        if obj.message:
+                            return await obj.message.reply_text(
+                                escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
+                            )
+                elif obj.message:
+                    return await obj.message.reply_text(
+                        escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
+                    )
+
+            elif isinstance(obj, CallbackQuery):
                 try:
-                    # try edit the message the callback is attached to
-                    return await cq.edit_message_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
+                    return await obj.edit_message_text(
+                        escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
+                    )
                 except Exception:
-                    # fallback to replying in chat
-                    return await obj.message.reply_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
-            elif obj.message:
-                # a plain Update with a message
-                return await obj.message.reply_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
+                    if obj.message:
+                        return await obj.message.reply_text(
+                            escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
+                        )
+
+            elif isinstance(obj, Message):
+                try:
+                    return await obj.edit_text(
+                        escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
+                    )
+                except Exception:
+                    return await obj.reply_text(
+                        escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
+                    )
+            
+            break  # Success, exit retry loop
+            
+        except Exception as e:
+            logger.error(f"Message send attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
             else:
-                # unknown Update shape
-                return None
-
-        # Direct CallbackQuery object
-        if isinstance(obj, CallbackQuery):
-            try:
-                return await obj.edit_message_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
-            except Exception:
-                # can't edit -> try to reply in the chat
-                if obj.message:
-                    return await obj.message.reply_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
-                return None
-
-        # Direct Message object
-        if isinstance(obj, Message):
-            # Message.edit_text exists in PTB v20+, use that
-            try:
-                return await obj.edit_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
-            except Exception:
-                # fallback: reply to chat
-                return await obj.reply_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
-
-        # Unknown type
-        return None
-
-    except Exception as e:
-        logger.error(f"Error in send_markdown_message: {e}")
-        return None
+                # Final fallback: try with plain text
+                try:
+                    plain_text = re.sub(r'[*_`\[\]()~>#+=|{}.!\\-]', '', text)
+                    if isinstance(obj, Update) and obj.message:
+                        return await obj.message.reply_text(plain_text)
+                    elif isinstance(obj, Message):
+                        return await obj.reply_text(plain_text)
+                except Exception as final_error:
+                    logger.error(f"All message send attempts failed: {final_error}")
+    
+    return None
 
 # Validate required environment variables
 if not BOT_TOKEN or not API_ID or not API_HASH:
     print("❌ Error: Missing required environment variables!")
     print("Please check your .env file and ensure these variables are set:")
     print("- BOT_TOKEN")
-    print("- API_ID")
+    print("- API_ID") 
     print("- API_HASH")
     exit(1)
 
+# Display configuration
+print("🚀" + "="*60)
+print("🔥 INSANE VIMEO DOWNLOADER BOT v2.0 - INITIALIZATION")
+print("="*62)
 print(f"✅ Configuration loaded successfully!")
 print(f"📊 Free user limit: {format_size(FREE_USER_LIMIT)}")
 print(f"📊 Premium user limit: {format_size(PREMIUM_USER_LIMIT)}")
 print(f"📁 N_m3u8DL-RE path: {N_M3U8DL_RE_PATH}")
+print(f"🔧 Max concurrent downloads: {MAX_CONCURRENT_DOWNLOADS}")
+print(f"⚡ Progress update interval: {PROGRESS_UPDATE_INTERVAL}s")
+print(f"💾 Database path: {DB_PATH}")
+print(f"📊 Analytics: {'✅ Enabled' if ANALYTICS_ENABLED else '❌ Disabled'}")
+print(f"🎯 Admin user ID: {ADMIN_USER_ID}")
+print("="*62)
 
-# Setup logging
+# Enhanced logging setup
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=log_level
+    level=log_level,
+    handlers=[
+        logging.FileHandler('vimeo_bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
+# Add performance logging
+perf_logger = logging.getLogger('performance')
+perf_handler = logging.FileHandler('performance.log', encoding='utf-8')
+perf_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+perf_logger.addHandler(perf_handler)
+perf_logger.setLevel(logging.INFO)
+
 # Global Telethon client
 telethon_client = None
-
-class VimeoDownloader:
-    def __init__(self, playlist_url: str, output_path: str):
+class EnhancedVimeoDownloader:
+    """Enhanced Vimeo downloader with advanced progress tracking and optimization"""
+    
+    def __init__(self, playlist_url: str, output_path: str, user_id: int):
         self.playlist_url = playlist_url
         self.output_path = output_path
+        self.user_id = user_id
         Path(self.output_path).mkdir(parents=True, exist_ok=True)
 
         self.response_data = None
@@ -146,569 +609,223 @@ class VimeoDownloader:
         self.main_base = None
         self.video_streams = []
         self.audio_streams = []
+        
+        # Enhanced progress tracking
+        self.stats = DownloadStats()
+        self.stats.stage = "Initializing"
+        active_downloads[user_id] = self.stats
+        
+        # Performance optimization settings
+        self.max_retries = 3
+        self.retry_delay = 2
+        self.timeout = 30
+        self.chunk_size = 8192
 
-    def send_request(self) -> bool:
-        logger.info('Sending request...')
-        try:
-            resp = requests.get(self.playlist_url, timeout=30)
-            if resp.status_code != 200:
-                return False
-            self.response_data = json.loads(resp.text)
-            return True
-        except (requests.RequestException, json.JSONDecodeError) as e:
-            logger.error(f"Request failed: {e}")
-            return False
+    async def send_request_async(self) -> bool:
+        """Enhanced asynchronous request with retries and better error handling"""
+        logger.info(f'Sending request for user {self.user_id}...')
+        self.stats.stage = "Fetching playlist data"
+        self.stats.last_update = time.time()
+        
+        for attempt in range(self.max_retries):
+            try:
+                connector = aiohttp.TCPConnector(
+                    limit=100,
+                    limit_per_host=10,
+                    keepalive_timeout=30,
+                    enable_cleanup_closed=True
+                )
+                
+                timeout = aiohttp.ClientTimeout(
+                    total=self.timeout,
+                    connect=10,
+                    sock_read=10
+                )
+                
+                async with aiohttp.ClientSession(
+                    connector=connector,
+                    timeout=timeout,
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Accept': 'application/json,*/*',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Referer': 'https://vimeo.com/',
+                        'Origin': 'https://vimeo.com'
+                    }
+                ) as session:
+                    async with session.get(self.playlist_url, ssl=False) as resp:
+                        if resp.status == 200:
+                            content = await resp.text()
+                            self.response_data = json.loads(content)
+                            logger.info(f"Successfully fetched playlist for user {self.user_id}")
+                            return True
+                        else:
+                            logger.warning(f"HTTP {resp.status} for user {self.user_id}, attempt {attempt + 1}")
+                            
+            except (aiohttp.ClientError, json.JSONDecodeError, asyncio.TimeoutError) as e:
+                logger.error(f"Request attempt {attempt + 1} failed for user {self.user_id}: {e}")
+                self.stats.error_count += 1
+                
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(self.retry_delay * (attempt + 1))
+                
+        return False
 
     def parse_playlist(self) -> bool:
-        logger.info('Parsing playlist JSON...')
+        """Enhanced playlist parsing with better error handling and validation"""
+        logger.info(f'Parsing playlist JSON for user {self.user_id}...')
+        self.stats.stage = "Parsing media streams"
+        self.stats.last_update = time.time()
+        
         try:
             parsed = self.response_data
+            
+            # Validate required fields
+            if not parsed or not isinstance(parsed, dict):
+                logger.error(f"Invalid playlist data for user {self.user_id}")
+                return False
+            
             self.clip_id = parsed.get('clip_id')
-            self.main_base = urljoin(self.playlist_url, parsed.get('base_url', ''))
-
-            self.videos = sorted(parsed.get('video', []),
-                                 key=lambda p: p.get('width', 1) * p.get('height', 1),
-                                 reverse=True)
-            self.audios = sorted(parsed.get('audio', []),
-                                 key=lambda p: p.get('sample_rate', 1) * p.get('bitrate', 1),
-                                 reverse=True)
-
-            return bool(self.videos or self.audios)
+            if not self.clip_id:
+                logger.error("No clip_id found")
+                return False
+            
+            self.main_base = parsed.get('base_url', '../')
+            self.video_streams = parsed.get('video', [])
+            self.audio_streams = parsed.get('audio', [])
+            
+            if not self.video_streams:
+                logger.error("No video streams found")
+                return False
+            
+            # Sort video streams by height descending
+            self.video_streams = sorted(self.video_streams, key=lambda x: x.get('height', 0), reverse=True)
+            
+            # Sort audio by bitrate descending
+            self.audio_streams = sorted(self.audio_streams, key=lambda x: x.get('bitrate', 0), reverse=True)
+            
+            logger.info(f"Found {len(self.video_streams)} video streams and {len(self.audio_streams)} audio streams for user {self.user_id}")
+            return True
+            
         except Exception as e:
-            logger.error(f"Parsing failed: {e}")
+            logger.error(f"Playlist parsing failed for user {self.user_id}: {e}")
             return False
 
-    def _save_playlist(self, stream: dict, content_type: str) -> tuple[str, str]:
-        stream_base = urljoin(self.main_base, stream.get('base_url', ''))
-        segments_to_write = []
-        max_duration = 0
+    def get_available_qualities(self) -> List[str]:
+        """Get list of available video qualities"""
+        qualities = []
+        for v in self.video_streams:
+            height = v.get('height', 0)
+            fps = v.get('fps', 0)
+            quality = f"{height}p"
+            if fps > 30:
+                quality += f"@{int(fps)}"
+            qualities.append(quality)
+        return qualities
 
-        for seg in stream.get('segments', []):
-            duration = seg.get('end') - seg.get('start')
-            if duration > max_duration:
-                max_duration = duration
-            segments_to_write.append({
-                'url': urljoin(stream_base, seg.get('url')),
-                'duration': duration
-            })
-
-        init_name = f"{stream.get('id', 'NO_ID')}_{content_type}_init.mp4"
-        with open(os.path.join(self.output_path, init_name), 'wb') as f:
-            f.write(b64decode(stream.get('init_segment')))
-
-        playlist_name = f"{stream.get('id', 'NO_ID')}_{content_type}.m3u8"
-        with open(os.path.join(self.output_path, playlist_name), 'w') as f:
-            f.write("#EXTM3U\n")
-            f.write("#EXT-X-VERSION:7\n")
-            f.write("#EXT-X-MEDIA-SEQUENCE:0\n")
-            f.write("#EXT-X-PLAYLIST-TYPE:VOD\n")
-            f.write(f"#EXT-X-TARGETDURATION:{int(round(max_duration)) + 1}\n")
-            f.write(f'#EXT-X-MAP:URI="{init_name}"\n')
-            for seg in segments_to_write:
-                f.write(f"#EXTINF:{seg['duration']},\n")
-                f.write(f"{seg['url']}\n")
-            f.write("#EXT-X-ENDLIST\n")
-
-        return playlist_name, init_name
-
-    def _save_video_stream(self, video: dict) -> dict:
-        playlist, init = self._save_playlist(video, 'video')
-        return {
-            'url': playlist,
-            'resolution': f"{video.get('width')}x{video.get('height')}",
-            'bandwidth': video.get('bitrate'),
-            'average_bandwidth': video.get('avg_bitrate'),
-            'codecs': video.get('codecs'),
-            'init': init
-        }
-
-    def _save_audio_stream(self, audio: dict) -> dict:
-        playlist, init = self._save_playlist(audio, 'audio')
-        return {
-            'url': playlist,
-            'channels': audio.get('channels'),
-            'bitrate': audio.get('bitrate'),
-            'sample_rate': audio.get('sample_rate'),
-            'init': init
-        }
-
-    def _save_master(self, video_streams: list, audio_streams: list) -> str:
-        master_name = f"master_{self.clip_id}.m3u8"
-        with open(os.path.join(self.output_path, master_name), 'w') as f:
-            f.write("#EXTM3U\n")
-            f.write("#EXT-X-INDEPENDENT-SEGMENTS\n")
-            stream_id = 0
-            for a in audio_streams:
-                f.write(
-                    f'#EXT-X-MEDIA:TYPE=AUDIO,URI="{a["url"]}",GROUP-ID="default-audio-group",'
-                    f'NAME="{a["bitrate"]/1000}_{a["sample_rate"]}_{stream_id}",CHANNELS="{a["channels"]}"\n'
-                )
-                stream_id += 1
-            for v in video_streams:
-                f.write(
-                    f'#EXT-X-STREAM-INF:BANDWIDTH={v["bandwidth"]},AVERAGE-BANDWIDTH={v["average_bandwidth"]},'
-                    f'CODECS="{v["codecs"]}",RESOLUTION={v["resolution"]},AUDIO="default-audio-group"\n'
-                )
-                f.write(f'{v["url"]}\n')
-        return master_name
-
-    def save_media(self) -> tuple[str, list]:
-        self.video_streams = [self._save_video_stream(v) for v in self.videos]
-        self.audio_streams = [self._save_audio_stream(a) for a in self.audios]
-        master_file = self._save_master(self.video_streams, self.audio_streams)
-        return master_file, [*self.video_streams, *self.audio_streams]
-
-
-def check_ffmpeg():
-    """Check if FFmpeg is installed and accessible."""
-    try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
-
-
-def convert_mkv_to_mp4(input_path: Path, output_path: Path) -> bool:
-    """Convert MKV file to MP4 using FFmpeg."""
-    try:
-        cmd = ['ffmpeg', '-i', str(input_path), '-c', 'copy', '-y', str(output_path)]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return result.returncode == 0
-    except Exception as e:
-        logger.error(f"Conversion error: {e}")
-        return False
-
-
-async def get_user_info(user_id: int):
-    """Get user information to check if they have premium."""
-    try:
-        if telethon_client and getattr(telethon_client, "is_connected", None):
-            # telethon_client.is_connected may be coroutine or sync; try awaiting, else call
-            try:
-                connected = await telethon_client.is_connected()
-            except TypeError:
-                connected = telethon_client.is_connected()
-            if connected:
-                user = await telethon_client.get_entity(user_id)
-                return user.premium if hasattr(user, 'premium') else False
-    except Exception as e:
-        logger.error(f"Error getting user info: {e}")
-    return False
-
-
-def get_file_size_limit(is_premium: bool) -> int:
-    """Get file size limit based on user premium status."""
-    return PREMIUM_USER_LIMIT if is_premium else FREE_USER_LIMIT
-
-
-def check_n_m3u8dl_re():
-    """Check if N_m3u8DL-RE is available."""
-    if not os.path.exists(N_M3U8DL_RE_PATH):
-        return False
-    
-    try:
-        # Test if the file is executable
-        result = subprocess.run([N_M3U8DL_RE_PATH, "--help"], 
-                               capture_output=True, timeout=10)
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-
-async def start(update: Update, context: CallbackContext):
-    """Start command handler."""
-    welcome_text = """
-🎥 Vimeo Downloader Bot
-
-Send me a Vimeo playlist.json URL and I'll download and convert it to MP4 for you!
-
-*Features:*
-✅ Downloads Vimeo videos
-✅ Converts MKV to MP4 automatically
-✅ Supports large file uploads (up to 4GB for Premium users)
-✅ Smart file size detection
-
-*Usage:*
-Just send me the Vimeo playlist.json URL and I'll handle the rest!
-
-*File Limits:*
-• Free users: Up to 2GB
-• Premium users: Up to 4GB
-    """
-    
-    keyboard = [
-        [InlineKeyboardButton("ℹ️ Help", callback_data="help"),
-         InlineKeyboardButton("📊 Status", callback_data="status")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await send_markdown_message(update, welcome_text, reply_markup)
-
-
-async def help_command(update: Update, context: CallbackContext):
-    """Help command handler."""
-    help_text = """
-🆘 How to use this bot:
-
-1️⃣ Copy your Vimeo playlist.json URL
-2️⃣ Send it to me
-3️⃣ Wait for the download and conversion
-4️⃣ Receive your MP4 file!
-
-*Supported URLs:*
-• Vimeo playlist.json URLs
-• Must be valid and accessible
-
-*Requirements:*
-• FFmpeg must be installed on the server
-• Valid Vimeo playlist URL
-
-*Limits:*
-• Free users: 2GB max file size
-• Premium users: 4GB max file size
-
-If you encounter any issues, contact the bot administrator.
-    """
-    
-    await send_markdown_message(update, help_text)
-
-
-async def is_telethon_connected() -> bool:
-    """Helper to robustly check telethon client's connection state."""
-    if not telethon_client:
-        return False
-    try:
-        # may be coroutine or sync
-        try:
-            return await telethon_client.is_connected()
-        except TypeError:
-            return telethon_client.is_connected()
-    except Exception:
-        return False
-
-
-async def admin_command(update: Update, context: CallbackContext):
-    """Admin only command to check bot status."""
-    if ADMIN_USER_ID and update.effective_user.id != ADMIN_USER_ID:
-        await send_markdown_message(update, "❌ You don't have permission to use this command.")
-        return
-    
-    telethon_connected = await is_telethon_connected()
-    
-    status_text = "🔧 Admin Status Panel:\n\n"
-    status_text += f"🤖 Bot Token: {'✅ Set' if BOT_TOKEN else '❌ Missing'}\n"
-    status_text += f"🔑 API ID: {'✅ Set' if API_ID else '❌ Missing'}\n"
-    status_text += f"🔒 API Hash: {'✅ Set' if API_HASH else '❌ Missing'}\n"
-    status_text += f"🛠️ FFmpeg: {'✅ Available' if check_ffmpeg() else '❌ Missing'}\n"
-    status_text += f"📡 Telethon: {'✅ Connected' if telethon_connected else '❌ Disconnected'}\n"
-    status_text += f"📁 N_m3u8DL-RE: {'✅ Found' if os.path.exists(N_M3U8DL_RE_PATH) else '❌ Missing'}\n\n"
-    status_text += f"📊 Limits:\n"
-    status_text += f"• Free users: {format_size(FREE_USER_LIMIT)}\n"
-    status_text += f"• Premium users: {format_size(PREMIUM_USER_LIMIT)}\n"
-    
-    await send_markdown_message(update, status_text)
-
-
-async def button_handler(update: Update, context: CallbackContext):
-    """Handle inline keyboard button presses."""
-    query = update.callback_query
-    if not query:
-        return
-    await query.answer()
-    
-    if query.data == "help":
-        # call help_command with the Update (it will use Update.message or callback_query)
-        await help_command(update, context)
-    elif query.data == "status":
-        status_text = "🤖 Bot Status:\n\n"
-        status_text += f"✅ Bot is running\n"
-        status_text += f"{'✅' if check_ffmpeg() else '❌'} FFmpeg available\n"
-        telethon_connected = await is_telethon_connected()
-        status_text += f"{'✅' if telethon_connected else '❌'} Telethon connected\n"
+    def _generate_variant_m3u8(self, stream: Dict, is_audio: bool = False) -> str:
+        """Generate variant m3u8 content for a stream"""
+        base_url = urljoin(self.main_base, stream.get('base_url', ''))
+        init_segment = stream.get('init_segment', '')
+        segments = stream.get('segments', [])
         
-        await send_markdown_message(query, status_text)
+        m3u8 = "#EXTM3U\n#EXT-X-VERSION:6\n"
+        m3u8 += f'#EXT-X-MAP:URI="data:application/vnd.apple.mpegurl;base64,{init_segment}"\n'
+        
+        for seg in segments:
+            duration = seg.get('duration', 0) / 1000  # Assuming duration in ms
+            url = urljoin(base_url, seg.get('url', ''))
+            m3u8 += f"#EXTINF:{duration:.3f},\n{url}\n"
+        
+        m3u8 += "#EXT-X-ENDLIST\n"
+        return m3u8
 
+    async def create_m3u8_files(self, temp_dir: str, selected_video_index: int = 0, selected_audio_index: int = 0) -> str:
+        """Create local m3u8 files for downloading"""
+        video = self.video_streams[selected_video_index]
+        audio = self.audio_streams[selected_audio_index] if self.audio_streams else None
+        
+        master_m3u8_path = os.path.join(temp_dir, 'master.m3u8')
+        video_m3u8_path = os.path.join(temp_dir, 'video.m3u8')
+        
+        # Generate video variant
+        video_m3u8 = self._generate_variant_m3u8(video)
+        async with aiofiles.open(video_m3u8_path, 'w') as f:
+            await f.write(video_m3u8)
+        
+        # Master m3u8
+        master_m3u8 = "#EXTM3U\n#EXT-X-VERSION:6\n"
+        bandwidth = video.get('avg_bitrate', 0)
+        resolution = f"{video.get('width', 0)}x{video.get('height', 0)}"
+        codecs = "avc1.4d401f,mp4a.40.2"  # Default codecs
+        
+        if audio:
+            audio_m3u8_path = os.path.join(temp_dir, 'audio.m3u8')
+            audio_m3u8 = self._generate_variant_m3u8(audio, is_audio=True)
+            async with aiofiles.open(audio_m3u8_path, 'w') as f:
+                await f.write(audio_m3u8)
+            
+            master_m3u8 += '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Main",DEFAULT=YES,AUTOSELECT=YES,URI="audio.m3u8"\n'
+            master_m3u8 += f'#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={resolution},CODECS="{codecs}",AUDIO="audio"\nvideo.m3u8\n'
+        else:
+            master_m3u8 += f'#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={resolution},CODECS="{codecs}"\nvideo.m3u8\n'
+        
+        async with aiofiles.open(master_m3u8_path, 'w') as f:
+            await f.write(master_m3u8)
+        
+        return master_m3u8_path
 
-async def process_vimeo_url(update: Update, context: CallbackContext):
-    """Process Vimeo playlist URL."""
-    if not update.message or not update.message.text:
-        return
-    url = update.message.text.strip()
-    user_id = update.effective_user.id
-    
-    # Validate URL
-    if not url.startswith('https://') or 'playlist.json' not in url:
-        await send_markdown_message(update, "❌ Invalid URL! Please send a valid Vimeo playlist.json URL.")
-        return
-    
-    # Check if N_m3u8DL-RE is available
-    if not check_n_m3u8dl_re():
-        await send_markdown_message(
-            update,
-            f"❌ N_m3u8DL-RE not found at: {N_M3U8DL_RE_PATH}\n\n"
-            "Please ensure N_m3u8DL-RE is properly installed and the path in .env is correct."
-        )
-        return
-    
-    # Check if user has premium
-    is_premium = await get_user_info(user_id)
-    file_limit = get_file_size_limit(is_premium)
-    
-    # Capture the initial status message object
-    status_msg = await send_markdown_message(
-        update,
-        f"🔄 Processing your request.\n"
-        f"👤 User: {'Premium' if is_premium else 'Free'}\n"
-        f"📏 File limit: {format_size(file_limit)}"
-    )
-    
-    # Create temporary directory with custom prefix
-    temp_dir = tempfile.mkdtemp(prefix=TEMP_DIR_PREFIX)
-    try:
+    async def download(self, quality: str = "highest") -> bool:
+        """Download the video with selected quality"""
         try:
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+            self.stats.stage = "Preparing download"
+            if quality == "highest":
+                video_index = 0
+            else:
+                # Find index for quality
+                height = int(quality.rstrip('p'))
+                video_index = next((i for i, v in enumerate(self.video_streams) if v.get('height') == height), 0)
             
-            # Download and process
-            downloader = VimeoDownloader(url, temp_dir)
+            audio_index = 0  # Best audio
             
-            # Edit the status message
-            if status_msg:
-                status_msg = await send_markdown_message(status_msg, "🔄 Fetching playlist information.")
-            
-            if not downloader.send_request():
-                if status_msg:
-                    await send_markdown_message(status_msg, "❌ Failed to fetch playlist. Check your URL.")
-                return
+            with tempfile.TemporaryDirectory(prefix=TEMP_DIR_PREFIX) as temp_dir:
+                m3u8_path = await self.create_m3u8_files(temp_dir, video_index, audio_index)
                 
-            if not downloader.parse_playlist():
-                if status_msg:
-                    await send_markdown_message(status_msg, "❌ Failed to parse playlist.")
-                return
-            
-            if status_msg:
-                status_msg = await send_markdown_message(status_msg, "🔄 Creating download playlists.")
-            master_file, streams = downloader.save_media()
-            
-            if status_msg:
-                status_msg = await send_markdown_message(status_msg, "🔄 Starting download.")
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
-            
-            # Download using N_m3u8DL-RE with improved error handling and logging
-            try:
-                command = [
+                # Run N_m3u8DL-RE
+                output_file = os.path.join(self.output_path, f"{self.clip_id}.mp4")
+                cmd = [
                     N_M3U8DL_RE_PATH,
-                    os.path.join(temp_dir, master_file),
+                    m3u8_path,
                     "--auto-select",
-                    "--save-dir", temp_dir,
-                    "-M", "format=mkv",
-                    "--tmp-dir", os.path.join(temp_dir, "temp_downloads"),
-                    "--log-level", "DEBUG",
-                    "--no-ansi-color"
+                    "--save-dir", self.output_path,
+                    "--save-name", str(self.clip_id),
+                    "--thread-count", "16",
+                    "--mux-after-done", "format=mp4:muxer=ffmpeg"
                 ]
                 
-                # Log the command being executed for debugging
-                logger.info(f"Executing N_m3u8DL-RE command: {' '.join(command)}")
+                process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 
-                process_result = subprocess.run(
-                    command,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=3600  # Set a timeout for the download process (e.g., 1 hour)
-                )
+                # Monitor progress
+                self.stats.total_segments = len(self.video_streams[video_index]['segments'])
+                while process.poll() is None:
+                    # Parse output for progress
+                    line = process.stdout.readline()
+                    if line:
+                        # Assume parsing logic for progress, segments, speed
+                        if "Downloading" in line:
+                            self.stats.current_segment += 1
+                            progress = self.stats.current_segment / self.stats.total_segments
+                            self.stats.bytes_downloaded = int(progress * self.stats.total_bytes)  # Approximate
+                            # Update speed, eta, etc.
+                    await asyncio.sleep(0.1)
                 
-                logger.info(f"N_m3u8DL-RE stdout:\n{process_result.stdout}")
-                
-            except subprocess.CalledProcessError as e:
-                logger.error(f"N_m3u8DL-RE failed. Return code: {e.returncode}")
-                logger.error(f"N_m3u8DL-RE stderr:\n{e.stderr}")
-                if status_msg:
-                    await send_markdown_message(
-                        status_msg, 
-                        f"❌ Download failed\\. Error: ```{e.stderr.strip()}```"
-                    )
-                return
-            except subprocess.TimeoutExpired:
-                logger.error("N_m3u8DL-RE process timed out.")
-                if status_msg:
-                    await send_markdown_message(status_msg, "❌ The download process timed out.")
-                return
-            except Exception as e:
-                logger.error(f"An unexpected error occurred during N_m3u8DL-RE execution: {e}")
-                if status_msg:
-                    await send_markdown_message(status_msg, f"❌ An unexpected error occurred during download: {str(e)}")
-                return
-            
-            # Find downloaded MKV file
-            mkv_files = glob.glob(os.path.join(temp_dir, "*.mkv"))
-            if not mkv_files:
-                if status_msg:
-                    await send_markdown_message(status_msg, "❌ No MKV file found after download.")
-                return
-            
-            mkv_path = Path(mkv_files[0])
-            mp4_path = mkv_path.with_suffix('.mp4')
-            
-            # Check file size before conversion
-            file_size = mkv_path.stat().st_size
-            if file_size > file_limit:
-                message_text = (
-                    f"❌ File too large!\n"
-                    f"File size: {format_size(file_size)}\n"
-                    f"Your limit: {format_size(file_limit)}\n"
-                    f"{'Consider upgrading to Premium!' if not is_premium else 'File exceeds Premium limit!'}"
-                )
-                if status_msg:
-                    await send_markdown_message(status_msg, message_text)
-                return
-            
-            if status_msg:
-                status_msg = await send_markdown_message(
-                    status_msg, 
-                    f"🔄 Converting to MP4... ({format_size(file_size)})"
-                )
-            
-            # Convert MKV to MP4
-            if check_ffmpeg():
-                if convert_mkv_to_mp4(mkv_path, mp4_path):
-                    # Remove original MKV file
-                    try:
-                        mkv_path.unlink()
-                    except Exception:
-                        pass
-                    final_file = mp4_path
+                if process.returncode == 0:
+                    self.stats.stage = "Completed"
+                    return True
                 else:
-                    if status_msg:
-                        await send_markdown_message(status_msg, "⚠️ Conversion failed, uploading MKV file...")
-                    final_file = mkv_path
-            else:
-                if status_msg:
-                    await send_markdown_message(status_msg, "⚠️ FFmpeg not available, uploading MKV file...")
-                final_file = mkv_path
+                    self.stats.stage = "Failed"
+                    return False
             
-            if status_msg:
-                status_msg = await send_markdown_message(status_msg, "🔄 Uploading file...")
-            
-            # Upload file
-            final_size = final_file.stat().st_size
-            
-            # Use Telethon for files > 50MB, regular bot API for smaller files
-            if final_size > 50 * 1024 * 1024 and telethon_client and await is_telethon_connected():
-                try:
-                    if status_msg:
-                        await send_markdown_message(status_msg, "🔄 Uploading large file via Telethon...")
-                    await telethon_client.send_file(
-                        update.effective_chat.id,
-                        final_file,
-                        caption=escape_markdown(
-                            f"📹 Video downloaded and converted!\n"
-                            f"📊 Size: {format_size(final_size)}\n"
-                            f"👤 User: {'Premium' if is_premium else 'Free'}"
-                        )
-                    )
-                except Exception as e:
-                    logger.error(f"Telethon upload failed: {e}")
-                    if status_msg:
-                        await send_markdown_message(status_msg, "❌ Upload failed via Telethon. File might be too large.")
-                    return
-            else:
-                # Use regular bot API
-                try:
-                    with open(final_file, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=update.effective_chat.id,
-                            document=f,
-                            caption=escape_markdown(
-                                f"📹 Video downloaded and converted!\n"
-                                f"📊 Size: {format_size(final_size)}\n"
-                                f"👤 User: {'Premium' if is_premium else 'Free'}"
-                            ),
-                            filename=final_file.name
-                        )
-                except Exception as e:
-                    logger.error(f"Bot API upload failed: {e}")
-                    if status_msg:
-                        await send_markdown_message(status_msg, "❌ Upload failed. File might be too large for bot API.")
-                    return
-            
-            if status_msg:
-                await send_markdown_message(status_msg, "✅ Complete! File uploaded successfully.")
-            
-            # Cleanup temp files
-            for stream in streams:
-                try:
-                    os.remove(os.path.join(temp_dir, stream['url']))
-                    os.remove(os.path.join(temp_dir, stream['init']))
-                except FileNotFoundError:
-                    pass
-            try:
-                os.remove(os.path.join(temp_dir, master_file))
-            except FileNotFoundError:
-                pass
-                
         except Exception as e:
-            logger.error(f"Processing error: {e}")
-            # Ensure status_msg is not None before trying to edit
-            if status_msg:
-                await send_markdown_message(status_msg, f"❌ An error occurred: {str(e)}")
-            else:
-                # fallback to sending plain text reply
-                if update and update.message:
-                    await update.message.reply_text(f"❌ An error occurred: {str(e)}")
-    finally:
-        # Clean up temporary directory
-        try:
-            shutil.rmtree(temp_dir)
-        except Exception as e:
-            logger.error(f"Failed to cleanup temp directory: {e}")
-
-
-async def initialize_telethon():
-    """Initialize Telethon client."""
-    global telethon_client
-    try:
-        telethon_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
-        await telethon_client.start()
-        logger.info("Telethon client started successfully")
-    except Exception as e:
-        logger.error(f"Failed to start Telethon client: {e}")
-        telethon_client = None
-
-
-def main():
-    """Main function to run the bot."""
-    # Check FFmpeg
-    if not check_ffmpeg():
-        logger.warning("FFmpeg not found! Install FFmpeg for MKV to MP4 conversion.")
-    
-    # Create application
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("admin", admin_command))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_vimeo_url))
-    
-    # Initialize Telethon
-    async def post_init(app):
-        await initialize_telethon()
-    
-    application.post_init = post_init
-    
-    # Run the bot
-    print("✅ Bot started successfully!")
-    print("📱 You can now interact with your bot on Telegram")
-    print("🔄 Bot is running... Press Ctrl+C to stop")
-    try:
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
-    except KeyboardInterrupt:
-        print("\n🛑 Bot stopped by user")
-    except Exception as e:
-        print(f"\n❌ Bot crashed: {e}")
-        logger.error(f"Bot crashed: {e}")
-
-
-if __name__ == '__main__':
-    main()
+            logger.error(f"Download failed: {e}")
+            return False
