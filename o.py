@@ -5,20 +5,20 @@ import subprocess
 import asyncio
 import tempfile
 import shutil
+import time
+import glob
 from base64 import b64decode
 from pathlib import Path
 from urllib.parse import urljoin
 from typing import Optional
-import requests
-import glob
-from dotenv import load_dotenv
 
+import requests
+from dotenv import load_dotenv
+from telethon import TelegramClient
+from telethon.errors import FloodWaitError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
 from telegram.constants import ParseMode, ChatAction
-from telethon import TelegramClient
-from telethon.errors import FloodWaitError
-import time
 
 # Load environment variables
 load_dotenv()
@@ -37,6 +37,17 @@ PREMIUM_USER_LIMIT = int(os.getenv("PREMIUM_USER_LIMIT_GB", "4")) * 1024 * 1024 
 # File paths
 N_M3U8DL_RE_PATH = os.getenv("N_M3U8DL_RE_PATH", "./N_m3u8DL-RE")
 TEMP_DIR_PREFIX = os.getenv("TEMP_DIR_PREFIX", "vimeo_bot_temp_")
+
+def format_size(size_bytes: int) -> str:
+    """Format file size in human readable format."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024**2:
+        return f"{size_bytes/1024:.1f} KB"
+    elif size_bytes < 1024**3:
+        return f"{size_bytes/(1024**2):.1f} MB"
+    else:
+        return f"{size_bytes/(1024**3):.1f} GB"
 
 # Validate required environment variables
 if not BOT_TOKEN or not API_ID or not API_HASH:
@@ -233,22 +244,10 @@ def check_n_m3u8dl_re():
     try:
         # Test if the file is executable
         result = subprocess.run([N_M3U8DL_RE_PATH, "--help"], 
-                              capture_output=True, timeout=10)
+                             capture_output=True, timeout=10)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return False
-
-
-def format_size(size_bytes: int) -> str:
-    """Format file size in human readable format."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024**2:
-        return f"{size_bytes/1024:.1f} KB"
-    elif size_bytes < 1024**3:
-        return f"{size_bytes/(1024**2):.1f} MB"
-    else:
-        return f"{size_bytes/(1024**3):.1f} GB"
 
 
 async def start(update: Update, context: CallbackContext):
@@ -347,19 +346,6 @@ async def button_handler(update: Update, context: CallbackContext):
         status_text += f"{'✅' if telethon_client and telethon_client.is_connected() else '❌'} Telethon connected\n"
         
         await query.edit_message_text(status_text, parse_mode=ParseMode.MARKDOWN)
-    """Handle inline keyboard button presses."""
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "help":
-        await help_command(query, context)
-    elif query.data == "status":
-        status_text = "🤖 **Bot Status:**\n\n"
-        status_text += f"✅ Bot is running\n"
-        status_text += f"{'✅' if check_ffmpeg() else '❌'} FFmpeg available\n"
-        status_text += f"{'✅' if telethon_client and telethon_client.is_connected() else '❌'} Telethon connected\n"
-        
-        await query.edit_message_text(status_text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def process_vimeo_url(update: Update, context: CallbackContext):
@@ -427,7 +413,7 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                     "--workDir", temp_dir
                 ], check=True, capture_output=True)
             except subprocess.CalledProcessError as e:
-                await status_msg.edit_text(f"❌ Download failed: {e}")
+                await status_msg.edit_text(f"❌ Download failed: {e.stderr.decode()}")
                 return
             
             # Find downloaded MKV file
