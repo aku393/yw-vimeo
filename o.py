@@ -498,13 +498,12 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                 command = [
                     N_M3U8DL_RE_PATH,
                     os.path.join(temp_dir, master_file),
-                    "-M", "format=mkv",
+                    "--auto-select",
                     "--save-dir", temp_dir,
+                    "-M", "format=mkv",
                     "--tmp-dir", os.path.join(temp_dir, "temp_downloads"),
-                    "--log-level", "DEBUG",  # This will provide more detailed logs
-                    "--auto-select",        # Automatically select the best streams
-                    "--no-multi-thread",    # To avoid potential threading issues in some environments
-                    "--no-ansi-color"       # To prevent the tool from using colors which can mess up logs
+                    "--log-level", "DEBUG",
+                    "--no-ansi-color"
                 ]
                 
                 # Log the command being executed for debugging
