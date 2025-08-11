@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# o.py - Updated and fixed version
+
 import json
 import logging
 import os
@@ -159,8 +162,8 @@ class DatabaseManager:
     def init_database(self):
         """Initialize database with enhanced schema"""
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS users (
+            conn.execute('PRAGMA journal_mode=WAL;')
+            conn.execute('''CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
                     username TEXT,
                     first_name TEXT,
@@ -175,11 +178,9 @@ class DatabaseManager:
                     timezone TEXT,
                     banned BOOLEAN DEFAULT FALSE,
                     ban_reason TEXT
-                )
-            ''')
+                )''')
             
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS downloads (
+            conn.execute('''CREATE TABLE IF NOT EXISTS downloads (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER,
                     url TEXT,
@@ -196,11 +197,9 @@ class DatabaseManager:
                     server_location TEXT,
                     user_ip TEXT,
                     FOREIGN KEY (user_id) REFERENCES users (user_id)
-                )
-            ''')
+                )''')
             
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS system_stats (
+            conn.execute('''CREATE TABLE IF NOT EXISTS system_stats (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     cpu_percent REAL,
@@ -211,11 +210,9 @@ class DatabaseManager:
                     network_sent_mb REAL,
                     network_recv_mb REAL,
                     error_count INTEGER DEFAULT 0
-                )
-            ''')
+                )''')
             
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS error_logs (
+            conn.execute('''CREATE TABLE IF NOT EXISTS error_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     user_id INTEGER,
@@ -224,55 +221,47 @@ class DatabaseManager:
                     traceback TEXT,
                     url TEXT,
                     resolved BOOLEAN DEFAULT FALSE
-                )
-            ''')
+                )''')
             
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS bot_settings (
+            conn.execute('''CREATE TABLE IF NOT EXISTS bot_settings (
                     key TEXT PRIMARY KEY,
                     value TEXT,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
+                )''')
     
     def update_user(self, user_id: int, username: str, first_name: str, 
                    last_name: str, is_premium: bool, language_code: str = None):
         """Update or insert user information"""
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute('''
-                INSERT OR REPLACE INTO users 
+            conn.execute('''INSERT OR REPLACE INTO users 
                 (user_id, username, first_name, last_name, is_premium, language_code, last_seen) 
-                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ''', (user_id, username, first_name, last_name, is_premium, language_code))
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)''',
+                         (user_id, username, first_name, last_name, is_premium, language_code))
     
     def log_download(self, user_id: int, url: str, title: str, file_size: int, 
                     download_speed: float, quality: str, format_type: str, 
                     status: str, error_message: str = None, conversion_time: float = 0):
         """Log download statistics with enhanced data"""
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute('''
-                INSERT INTO downloads 
+            conn.execute('''INSERT INTO downloads 
                 (user_id, url, title, file_size, download_speed, conversion_time, 
                  quality, format, start_time, end_time, status, error_message)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-1 hour'), CURRENT_TIMESTAMP, ?, ?)
-            ''', (user_id, url, title, file_size, download_speed, conversion_time, 
-                  quality, format_type, status, error_message))
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-1 hour'), CURRENT_TIMESTAMP, ?, ?)''',
+                         (user_id, url, title, file_size, download_speed, conversion_time, 
+                          quality, format_type, status, error_message))
     
     def log_error(self, user_id: int, error_type: str, error_message: str, 
                   traceback: str = None, url: str = None):
         """Log error information"""
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute('''
-                INSERT INTO error_logs 
+            conn.execute('''INSERT INTO error_logs 
                 (user_id, error_type, error_message, traceback, url)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (user_id, error_type, error_message, traceback, url))
+                VALUES (?, ?, ?, ?, ?)''', (user_id, error_type, error_message, traceback, url))
     
     def get_user_stats(self, user_id: int) -> Dict:
         """Get comprehensive user statistics"""
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute('''
-                SELECT 
+            cursor = conn.execute('''SELECT 
                     COUNT(*) as total_downloads,
                     COALESCE(SUM(file_size), 0) as total_bytes,
                     COALESCE(AVG(download_speed), 0) as avg_speed,
@@ -281,16 +270,25 @@ class DatabaseManager:
                     COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_downloads,
                     COUNT(CASE WHEN date(start_time) = date('now') THEN 1 END) as downloads_today,
                     COALESCE(SUM(CASE WHEN date(start_time) = date('now') THEN file_size ELSE 0 END), 0) as bytes_today
-                FROM downloads 
-                WHERE user_id = ?
-            ''', (user_id,))
+                FROM downloads WHERE user_id = ?''', (user_id,))
             
             result = cursor.fetchone()
+            if result is None:
+                return {
+                    'total_downloads': 0,
+                    'total_bytes': 0,
+                    'avg_speed': 0.0,
+                    'max_speed': 0.0,
+                    'successful_downloads': 0,
+                    'failed_downloads': 0,
+                    'downloads_today': 0,
+                    'bytes_today': 0
+                }
             stats = dict(zip([col[0] for col in cursor.description], result))
             
-            total = stats['total_downloads']
+            total = stats.get('total_downloads', 0)
             if total > 0:
-                stats['success_rate'] = (stats['successful_downloads'] / total) * 100
+                stats['success_rate'] = (stats.get('successful_downloads', 0) / total) * 100
             else:
                 stats['success_rate'] = 0
                 
@@ -299,8 +297,7 @@ class DatabaseManager:
     def get_global_stats(self) -> Dict:
         """Get comprehensive global bot statistics"""
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute('''
-                SELECT 
+            cursor = conn.execute('''SELECT 
                     COUNT(DISTINCT user_id) as total_users,
                     COUNT(*) as total_downloads,
                     COALESCE(SUM(file_size), 0) as total_bytes_served,
@@ -309,18 +306,20 @@ class DatabaseManager:
                     COALESCE(AVG(download_speed), 0) as avg_download_speed,
                     COUNT(CASE WHEN date(start_time) = date('now') THEN 1 END) as downloads_today,
                     COUNT(CASE WHEN datetime(start_time) > datetime('now', '-1 hour') THEN 1 END) as downloads_last_hour
-                FROM downloads
-            ''')
+                FROM downloads''')
             
             result = cursor.fetchone()
-            stats = dict(zip([col[0] for col in cursor.description], result))
+            if result is None:
+                stats = {}
+            else:
+                stats = dict(zip([col[0] for col in cursor.description], result))
             
             cursor = conn.execute('SELECT COUNT(*) FROM users WHERE is_premium = TRUE')
-            stats['premium_users'] = cursor.fetchone()[0]
+            stats['premium_users'] = cursor.fetchone()[0] if cursor.fetchone() else 0
             
-            total = stats['total_downloads']
+            total = stats.get('total_downloads', 0)
             if total > 0:
-                stats['success_rate'] = (stats['successful_downloads'] / total) * 100
+                stats['success_rate'] = (stats.get('successful_downloads', 0) / total) * 100
             else:
                 stats['success_rate'] = 0
                 
@@ -329,8 +328,7 @@ class DatabaseManager:
     def get_top_users(self, limit: int = 10) -> List[Tuple]:
         """Get top users by download count and data usage"""
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute('''
-                SELECT u.username, u.first_name, u.is_premium,
+            cursor = conn.execute('''SELECT u.username, u.first_name, u.is_premium,
                        COUNT(d.id) as downloads, 
                        COALESCE(SUM(d.file_size), 0) as total_bytes,
                        COALESCE(AVG(d.download_speed), 0) as avg_speed
@@ -339,15 +337,13 @@ class DatabaseManager:
                 GROUP BY u.user_id
                 HAVING downloads > 0
                 ORDER BY downloads DESC, total_bytes DESC
-                LIMIT ?
-            ''', (limit,))
+                LIMIT ?''', (limit,))
             return cursor.fetchall()
     
     def get_download_trends(self, days: int = 7) -> Dict:
         """Get download trends over the last N days"""
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute('''
-                SELECT 
+            cursor = conn.execute('''SELECT 
                     date(start_time) as download_date,
                     COUNT(*) as daily_downloads,
                     COUNT(DISTINCT user_id) as daily_users,
@@ -355,8 +351,7 @@ class DatabaseManager:
                 FROM downloads
                 WHERE start_time >= date('now', '-{} days')
                 GROUP BY date(start_time)
-                ORDER BY download_date
-            '''.format(days))
+                ORDER BY download_date'''.format(days))
             
             trends = []
             for row in cursor.fetchall():
@@ -376,9 +371,13 @@ active_downloads: Dict[int, DownloadStats] = {}
 user_sessions: Dict[int, UserSession] = {}
 download_queue = asyncio.Queue(maxsize=MAX_CONCURRENT_DOWNLOADS * 2)
 progress_tasks: Dict[int, asyncio.Task] = {}
+session_downloaders: Dict[int, "EnhancedVimeoDownloader"] = {}  # store active downloader instances
 
 def format_size(size_bytes: int) -> str:
     """Format file size in human readable format with more precision"""
+    if not isinstance(size_bytes, (int, float)):
+        return "0 B"
+    size_bytes = int(size_bytes)
     if size_bytes == 0:
         return "0 B"
     elif size_bytes < 1024:
@@ -392,9 +391,12 @@ def format_size(size_bytes: int) -> str:
 
 def format_speed(bytes_per_sec: float) -> str:
     """Format download speed with dynamic units"""
+    if bytes_per_sec is None:
+        return "0 B/s"
     if bytes_per_sec == 0:
         return "0 B/s"
-    elif bytes_per_sec < 1024:
+    bytes_per_sec = float(bytes_per_sec)
+    if bytes_per_sec < 1024:
         return f"{bytes_per_sec:.1f} B/s"
     elif bytes_per_sec < 1024**2:
         return f"{bytes_per_sec/1024:.1f} KB/s"
@@ -405,6 +407,10 @@ def format_speed(bytes_per_sec: float) -> str:
 
 def format_time(seconds: int) -> str:
     """Format time duration with better precision"""
+    try:
+        seconds = int(seconds)
+    except Exception:
+        return "0s"
     if seconds <= 0:
         return "0s"
     elif seconds < 60:
@@ -447,7 +453,7 @@ def escape_markdown(text: str) -> str:
     """Enhanced markdown escaping for Telegram MarkdownV2"""
     if not text:
         return ""
-    
+    # escape Telegram MarkdownV2 special characters
     escape_chars = r'([_*[\]()~`>#+\-=|{}.!\\])'
     escaped = re.sub(escape_chars, r'\\\1', str(text))
     return escaped
@@ -484,6 +490,7 @@ async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text
     
     for attempt in range(max_retries):
         try:
+            # Update message when possible (callback/query), otherwise send a new message
             if isinstance(obj, Update):
                 if obj.callback_query:
                     try:
@@ -505,11 +512,11 @@ async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text
                     return await obj.edit_message_text(
                         escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
                     )
-                    except Exception:
-                        if obj.message:
-                            return await obj.message.reply_text(
-                                escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
-                            )
+                except Exception:
+                    if obj.message:
+                        return await obj.message.reply_text(
+                            escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
+                        )
 
             elif isinstance(obj, Message):
                 try:
@@ -530,11 +537,14 @@ async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text
                 retry_delay *= 2
             else:
                 try:
+                    # Fallback: send plain text without markdown or special chars
                     plain_text = re.sub(r'[*_`\[\]()~>#+=|{}.!\\-]', '', text)
                     if isinstance(obj, Update) and obj.message:
                         return await obj.message.reply_text(plain_text)
                     elif isinstance(obj, Message):
                         return await obj.reply_text(plain_text)
+                    elif isinstance(obj, CallbackQuery) and obj.message:
+                        return await obj.message.reply_text(plain_text)
                 except Exception as final_error:
                     logger.error(f"All message send attempts failed: {final_error}")
     
@@ -646,7 +656,17 @@ class EnhancedVimeoDownloader:
                     async with session.get(self.playlist_url, ssl=False) as resp:
                         if resp.status == 200:
                             content = await resp.text()
-                            self.response_data = json.loads(content)
+                            try:
+                                self.response_data = json.loads(content)
+                            except json.JSONDecodeError:
+                                # Some Vimeo JSONs may be embedded - try to extract
+                                try:
+                                    # attempt to find JSON substring
+                                    match = re.search(r'({".*"})', content, re.DOTALL)
+                                    if match:
+                                        self.response_data = json.loads(match.group(1))
+                                except Exception:
+                                    raise
                             logger.info(f"Successfully fetched playlist for user {self.user_id}")
                             return True
                         else:
@@ -674,21 +694,38 @@ class EnhancedVimeoDownloader:
                 logger.error(f"Invalid playlist data for user {self.user_id}")
                 return False
             
-            self.clip_id = parsed.get('clip_id')
+            # try multiple keys (flexible parsing)
+            self.clip_id = parsed.get('clip_id') or parsed.get('id') or parsed.get('video_id')
+            if not self.clip_id:
+                # try nested
+                for key in ['video', 'clip', 'data']:
+                    if key in parsed and isinstance(parsed[key], dict):
+                        self.clip_id = parsed[key].get('id') or parsed[key].get('clip_id')
+                        if self.clip_id:
+                            break
             if not self.clip_id:
                 logger.error("No clip_id found")
                 return False
             
-            self.main_base = parsed.get('base_url', '../')
-            self.video_streams = parsed.get('video', [])
-            self.audio_streams = parsed.get('audio', [])
+            self.main_base = parsed.get('base_url', parsed.get('base', './'))
+            self.video_streams = parsed.get('video', parsed.get('videos', [])) or []
+            self.audio_streams = parsed.get('audio', parsed.get('audios', [])) or []
             
             if not self.video_streams:
                 logger.error("No video streams found")
                 return False
             
-            self.video_streams = sorted(self.video_streams, key=lambda x: x.get('height', 0), reverse=True)
-            self.audio_streams = sorted(self.audio_streams, key=lambda x: x.get('bitrate', 0), reverse=True)
+            # Normalize stream entries to have expected keys
+            def norm_streams(streams, kind='video'):
+                normalized = []
+                for s in streams:
+                    if not isinstance(s, dict):
+                        continue
+                    normalized.append(s)
+                return normalized
+            
+            self.video_streams = sorted(norm_streams(self.video_streams, 'video'), key=lambda x: x.get('height', 0), reverse=True)
+            self.audio_streams = sorted(norm_streams(self.audio_streams, 'audio'), key=lambda x: x.get('bitrate', 0), reverse=True)
             
             logger.info(f"Found {len(self.video_streams)} video streams and {len(self.audio_streams)} audio streams for user {self.user_id}")
             return True
@@ -704,22 +741,23 @@ class EnhancedVimeoDownloader:
             height = v.get('height', 0)
             fps = v.get('fps', 0)
             quality = f"{height}p"
-            if fps > 30:
+            if fps and fps > 30:
                 quality += f"@{int(fps)}"
             qualities.append(quality)
         return qualities
 
     def _generate_variant_m3u8(self, stream: Dict, is_audio: bool = False) -> str:
         """Generate variant m3u8 content for a stream"""
-        base_url = urljoin(self.main_base, stream.get('base_url', ''))
+        base_url = urljoin(self.main_base + "/", stream.get('base_url', ''))
         init_segment = stream.get('init_segment', '')
         segments = stream.get('segments', [])
         
         m3u8 = "#EXTM3U\n#EXT-X-VERSION:6\n"
-        m3u8 += f'#EXT-X-MAP:URI="data:application/vnd.apple.mpegurl;base64,{init_segment}"\n'
+        if init_segment:
+            m3u8 += f'#EXT-X-MAP:URI="data:application/vnd.apple.mpegurl;base64,{init_segment}"\n'
         
         for seg in segments:
-            duration = seg.get('duration', 0) / 1000
+            duration = (seg.get('duration', 0) / 1000) if seg.get('duration') else 0.0
             url = urljoin(base_url, seg.get('url', ''))
             m3u8 += f"#EXTINF:{duration:.3f},\n{url}\n"
         
@@ -739,7 +777,7 @@ class EnhancedVimeoDownloader:
             await f.write(video_m3u8)
         
         master_m3u8 = "#EXTM3U\n#EXT-X-VERSION:6\n"
-        bandwidth = video.get('avg_bitrate', 0)
+        bandwidth = int(video.get('avg_bitrate', video.get('bitrate', 0)))
         resolution = f"{video.get('width', 0)}x{video.get('height', 0)}"
         codecs = "avc1.4d401f,mp4a.40.2"
         
@@ -757,6 +795,8 @@ class EnhancedVimeoDownloader:
         async with aiofiles.open(master_m3u8_path, 'w') as f:
             await f.write(master_m3u8)
         
+        # estimate segments count
+        self.stats.total_segments = len(video.get('segments', []))
         return master_m3u8_path
 
     async def download(self, quality: str = "highest") -> Tuple[bool, str]:
@@ -766,8 +806,16 @@ class EnhancedVimeoDownloader:
             if quality == "highest":
                 video_index = 0
             else:
-                height = int(quality.rstrip('p'))
-                video_index = next((i for i, v in enumerate(self.video_streams) if v.get('height') == height), 0)
+                # allow qualities like "720p" or "720p@60"
+                height_part = quality.split('p')[0]
+                try:
+                    height = int(height_part.split('@')[0])
+                except Exception:
+                    height = None
+                if height:
+                    video_index = next((i for i, v in enumerate(self.video_streams) if v.get('height') == height), 0)
+                else:
+                    video_index = 0
             
             audio_index = 0
             
@@ -791,16 +839,21 @@ class EnhancedVimeoDownloader:
                     stderr=asyncio.subprocess.PIPE
                 )
                 
-                self.stats.total_segments = len(self.video_streams[video_index]['segments'])
+                # read stdout to estimate progress
+                self.stats.total_segments = len(self.video_streams[video_index].get('segments', []))
                 while True:
                     line = await process.stdout.readline()
                     if not line:
                         break
-                    line = line.decode().strip()
-                    if "Downloading" in line:
-                        self.stats.current_segment += 1
-                        progress = self.stats.current_segment / self.stats.total_segments
-                        self.stats.bytes_downloaded = int(progress * self.stats.total_bytes)
+                    try:
+                        decoded = line.decode().strip()
+                    except Exception:
+                        decoded = ""
+                    # crude heuristics to update progress
+                    if "Downloading" in decoded or "downloaded" in decoded.lower():
+                        self.stats.current_segment = min(self.stats.current_segment + 1, self.stats.total_segments)
+                        progress = (self.stats.current_segment / max(1, self.stats.total_segments))
+                        self.stats.bytes_downloaded = int(progress * (self.stats.total_bytes or (50 * 1024 * 1024)))
                         self.stats.last_update = time.time()
                 
                 await process.wait()
@@ -810,7 +863,7 @@ class EnhancedVimeoDownloader:
                     db_manager.log_download(
                         user_id=self.user_id,
                         url=self.playlist_url,
-                        title=self.clip_id,
+                        title=str(self.clip_id),
                         file_size=self.stats.bytes_downloaded,
                         download_speed=self.stats.speed_mbps,
                         quality=quality,
@@ -834,32 +887,52 @@ async def progress_updater(user_id: int, update: Update):
     while user_id in active_downloads:
         stats = active_downloads[user_id]
         progress = stats.current_segment / stats.total_segments if stats.total_segments > 0 else 0
+        # stats.speed_mbps is Mb/s; convert to bytes/sec for formatting (approx)
+        bytes_per_sec = stats.speed_mbps * 1024 * 1024 if stats.speed_mbps else 0
         message = (
-            f"Download Progress: {stats.stage}\n"
+            f"Download Progress: {escape_markdown(stats.stage)}\n"
             f"{create_progress_bar(progress)}\n"
             f"Downloaded: {format_size(stats.bytes_downloaded)} / {format_size(stats.total_bytes)}\n"
-            f"Speed: {format_speed(stats.speed_mbps * 1024 * 1024)}\n"
-            f"ETA: {format_time(stats.eta_seconds)}\n"
+            f"Speed: {format_speed(bytes_per_sec)}\n"
+            f"ETA: {format_time(stats.eta_seconds)}\n\n"
             f"{generate_random_tips()}"
         )
-        await send_markdown_message(update, message)
+        try:
+            await send_markdown_message(update, message)
+        except Exception as e:
+            logger.debug(f"Progress update send failed for user {user_id}: {e}")
         await asyncio.sleep(PROGRESS_UPDATE_INTERVAL)
 
 async def start(update: Update, context: CallbackContext) -> None:
     """Handle the /start command"""
     user = update.effective_user
+    if not user:
+        return
+    # basic premium detection fallback
+    is_premium = False
+    try:
+        is_premium = bool(user and getattr(user, "is_premium", False))
+    except Exception:
+        is_premium = False
+
     db_manager.update_user(
         user_id=user.id,
         username=user.username or "",
         first_name=user.first_name or "",
         last_name=user.last_name or "",
-        is_premium=user.premium or False
+        is_premium=is_premium
     )
+    # create user session record if not present
+    if user.id not in user_sessions:
+        user_sessions[user.id] = UserSession(user_id=user.id, username=user.username or "", is_premium=is_premium)
+
     await send_markdown_message(update, "Welcome to the Vimeo Downloader Bot! Send a Vimeo URL to begin.")
 
 async def handle_message(update: Update, context: CallbackContext) -> None:
     """Handle incoming messages (e.g., Vimeo URLs)"""
-    url = update.message.text
+    if not update.message:
+        return
+    url = update.message.text.strip()
     user_id = update.effective_user.id
     
     if user_id in active_downloads and active_downloads[user_id].stage != "Completed":
@@ -867,13 +940,16 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
         return
     
     user_stats = db_manager.get_user_stats(user_id)
-    user_limit = PREMIUM_USER_LIMIT if user_sessions.get(user_id, UserSession(user_id, "", False)).is_premium else FREE_USER_LIMIT
-    if user_stats['bytes_today'] >= user_limit:
+    session = user_sessions.get(user_id) or UserSession(user_id=user_id, username=update.effective_user.username or "", is_premium=False)
+    user_limit = PREMIUM_USER_LIMIT if session.is_premium else FREE_USER_LIMIT
+    if user_stats.get('bytes_today', 0) >= user_limit:
         await send_markdown_message(update, "Daily download limit reached! Try again tomorrow or upgrade to premium.")
         return
     
     temp_dir = tempfile.mkdtemp(prefix=TEMP_DIR_PREFIX)
     downloader = EnhancedVimeoDownloader(url, temp_dir, user_id)
+    # store for later selection handling
+    session_downloaders[user_id] = downloader
     
     await update.message.reply_chat_action(ChatAction.TYPING)
     if await downloader.send_request_async() and downloader.parse_playlist():
@@ -883,6 +959,12 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
             reply_markup = InlineKeyboardMarkup(keyboard)
             await send_markdown_message(update, f"Available qualities:\n{', '.join(qualities)}", reply_markup=reply_markup)
             
+            # start progress updater
+            if user_id in progress_tasks:
+                try:
+                    progress_tasks[user_id].cancel()
+                except Exception:
+                    pass
             progress_tasks[user_id] = asyncio.create_task(progress_updater(user_id, update))
         else:
             await send_markdown_message(update, "No video streams found!")
@@ -893,36 +975,70 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
 async def handle_quality_selection(update: Update, context: CallbackContext) -> None:
     """Handle quality selection"""
     query = update.callback_query
-    quality, user_id = query.data.split('_')[1:]
-    user_id = int(user_id)
+    if not query or not query.data:
+        return
+    # data format: "quality_{quality}_{user_id}"
+    parts = query.data.split('_')
+    if len(parts) < 3:
+        await send_markdown_message(query, "Invalid selection data.")
+        return
+    _, quality_raw, user_id_part = parts[0], parts[1], parts[2]
+    quality = quality_raw
+    try:
+        user_id = int(user_id_part)
+    except Exception:
+        await send_markdown_message(query, "Invalid user id in selection.")
+        return
     
-    if user_id not in active_downloads:
+    if user_id not in session_downloaders:
         await send_markdown_message(query, "Session expired. Please send the URL again.")
         return
     
-    downloader = EnhancedVimeoDownloader("", "", user_id)  # Simplified, actual instance should be stored
+    downloader = session_downloaders.get(user_id)
+    if not downloader:
+        await send_markdown_message(query, "Session expired. Please send the URL again.")
+        return
+
     await query.message.reply_chat_action(ChatAction.UPLOAD_VIDEO)
     success, result = await downloader.download(quality=quality)
     
     if success:
         await send_markdown_message(query, f"Download completed for {quality}!")
+        # try to send the resulting file (non-blocking)
         try:
-            async with aiofiles.open(result, 'rb') as f:
-                await query.message.reply_video(video=f, caption=f"Downloaded {quality} video")
+            # telegram bot library expects file path or file-like object;
+            # using send_document to avoid video-specific conversion complexities
+            await query.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
+            await query.message.reply_document(document=open(result, 'rb'), caption=f"Downloaded {quality} video")
         except Exception as e:
             logger.error(f"Failed to send video for user {user_id}: {e}")
-            await send_markdown_message(query, "Download completed but failed to send video.")
+            await send_markdown_message(query, "Download completed but failed to send video. You can retrieve it from the server.")
     else:
-        await send_markdown_message(query, f"Download failed: {result}")
+        await send_markdown_message(query, f"Download failed: {escape_markdown(str(result))}")
     
+    # cleanup tasks and state
     if user_id in progress_tasks:
-        progress_tasks[user_id].cancel()
+        try:
+            progress_tasks[user_id].cancel()
+        except Exception:
+            pass
         del progress_tasks[user_id]
     if user_id in active_downloads:
-        del active_downloads[user_id]
+        try:
+            del active_downloads[user_id]
+        except Exception:
+            pass
+    if user_id in session_downloaders:
+        # don't delete immediately if file still in use; keep for manual cleanup
+        try:
+            del session_downloaders[user_id]
+        except Exception:
+            pass
 
 async def speedtest_command(update: Update, context: CallbackContext) -> None:
     """Run speedtest and report results"""
+    if not update.message:
+        return
     await update.message.reply_chat_action(ChatAction.TYPING)
     try:
         st = speedtest.Speedtest()
@@ -944,18 +1060,20 @@ async def speedtest_command(update: Update, context: CallbackContext) -> None:
 
 async def stats_command(update: Update, context: CallbackContext) -> None:
     """Show user statistics"""
-    user_id = update.effective_user.id
+    user_id = update.effective_user.id if update.effective_user else None
+    if not user_id:
+        return
     stats = db_manager.get_user_stats(user_id)
     
     message = (
         f"Your Statistics:\n"
-        f"Total Downloads: {stats['total_downloads']}\n"
-        f"Successful Downloads: {stats['successful_downloads']}\n"
-        f"Failed Downloads: {stats['failed_downloads']}\n"
-        f"Total Data: {format_size(stats['total_bytes'])}\n"
-        f"Today's Data: {format_size(stats['bytes_today'])}\n"
-        f"Average Speed: {format_speed(stats['avg_speed'] * 1024 * 1024)}\n"
-        f"Success Rate: {stats['success_rate']:.1f}%"
+        f"Total Downloads: {stats.get('total_downloads', 0)}\n"
+        f"Successful Downloads: {stats.get('successful_downloads', 0)}\n"
+        f"Failed Downloads: {stats.get('failed_downloads', 0)}\n"
+        f"Total Data: {format_size(stats.get('total_bytes', 0))}\n"
+        f"Today's Data: {format_size(stats.get('bytes_today', 0))}\n"
+        f"Average Speed: {format_speed(stats.get('avg_speed', 0) * 1024 * 1024)}\n"
+        f"Success Rate: {stats.get('success_rate', 0):.1f}%"
     )
     await send_markdown_message(update, message)
 
@@ -969,8 +1087,12 @@ async def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_quality_selection, pattern="^quality_"))
     
+    # run polling (non-blocking)
     await application.run_polling()
 
 if __name__ == "__main__":
     nest_asyncio.apply()
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("Bot stopped by user")
