@@ -57,20 +57,33 @@ def escape_markdown(text: str) -> str:
     return re.sub(escape_chars, r'\\\1', text)
 
 async def send_markdown_message(update: Update, text: str, reply_markup=None):
-    """Helper function to send properly escaped MarkdownV2 messages."""
+    """Helper function to send and edit properly escaped MarkdownV2 messages.
+    
+    Returns the Message object for subsequent edits.
+    """
     escaped_text = escape_markdown(text)
-    if isinstance(update, Update):
-        await update.message.reply_text(
+    if isinstance(update, Update) and update.message:
+        return await update.message.reply_text(
             escaped_text,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=reply_markup
         )
-    else:  # For CallbackQuery
-        await update.edit_message_text(
+    elif isinstance(update, Update) and update.callback_query:
+        return await update.callback_query.edit_message_text(
             escaped_text,
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=reply_markup
         )
+    # A new check to handle passing a Message object directly
+    elif isinstance(update, telegram.Message):
+        return await update.edit_message_text(
+            escaped_text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=reply_markup
+        )
+    else:
+        logger.error("Could not send markdown message, invalid update object.")
+        return None
 
 # Validate required environment variables
 if not BOT_TOKEN or not API_ID or not API_HASH:
@@ -84,7 +97,7 @@ if not BOT_TOKEN or not API_ID or not API_HASH:
 print(f"✅ Configuration loaded successfully!")
 print(f"📊 Free user limit: {format_size(FREE_USER_LIMIT)}")
 print(f"📊 Premium user limit: {format_size(PREMIUM_USER_LIMIT)}")
-print(f"📁 N_m3u8DL-RE path: {N_M3U8DL_RE_PATH}")
+print(f"📁 N_m3u8DL-RE path: {N_M3u8DL_RE_PATH}")
 
 # Setup logging
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
@@ -267,7 +280,7 @@ def check_n_m3u8dl_re():
     try:
         # Test if the file is executable
         result = subprocess.run([N_M3U8DL_RE_PATH, "--help"], 
-                             capture_output=True, timeout=10)
+                               capture_output=True, timeout=10)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return False
@@ -343,7 +356,7 @@ async def admin_command(update: Update, context: CallbackContext):
     status_text += f"🔒 API Hash: {'✅ Set' if API_HASH else '❌ Missing'}\n"
     status_text += f"🛠️ FFmpeg: {'✅ Available' if check_ffmpeg() else '❌ Missing'}\n"
     status_text += f"📡 Telethon: {'✅ Connected' if telethon_client and telethon_client.is_connected() else '❌ Disconnected'}\n"
-    status_text += f"📁 N_m3u8DL-RE: {'✅ Found' if os.path.exists(N_M3U8DL_RE_PATH) else '❌ Missing'}\n\n"
+    status_text += f"📁 N_m3u8DL-RE: {'✅ Found' if os.path.exists(N_M3u8DL_RE_PATH) else '❌ Missing'}\n\n"
     status_text += f"📊 Limits:\n"
     status_text += f"• Free users: {format_size(FREE_USER_LIMIT)}\n"
     status_text += f"• Premium users: {format_size(PREMIUM_USER_LIMIT)}\n"
@@ -390,6 +403,7 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
     is_premium = await get_user_info(user_id)
     file_limit = get_file_size_limit(is_premium)
     
+    # Capture the initial status message object
     status_msg = await send_markdown_message(
         update,
         f"🔄 Processing your request.\n"
@@ -406,7 +420,8 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
             # Download and process
             downloader = VimeoDownloader(url, temp_dir)
             
-            await send_markdown_message(status_msg, "🔄 Fetching playlist information.")
+            # Edit the status message
+            status_msg = await send_markdown_message(status_msg, "🔄 Fetching playlist information.")
             
             if not downloader.send_request():
                 await send_markdown_message(status_msg, "❌ Failed to fetch playlist. Check your URL.")
@@ -416,10 +431,10 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                 await send_markdown_message(status_msg, "❌ Failed to parse playlist.")
                 return
             
-            await send_markdown_message(status_msg, "🔄 Creating download playlists.")
+            status_msg = await send_markdown_message(status_msg, "🔄 Creating download playlists.")
             master_file, streams = downloader.save_media()
             
-            await send_markdown_message(status_msg, "🔄 Starting download.")
+            status_msg = await send_markdown_message(status_msg, "🔄 Starting download.")
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
             
             # Download using N_m3u8DL-RE
@@ -458,7 +473,7 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                 await send_markdown_message(status_msg, message_text)
                 return
             
-            await send_markdown_message(
+            status_msg = await send_markdown_message(
                 status_msg, 
                 f"🔄 Converting to MP4... ({format_size(file_size)})"
             )
@@ -476,7 +491,7 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                 await send_markdown_message(status_msg, "⚠️ FFmpeg not available, uploading MKV file...")
                 final_file = mkv_path
             
-            await send_markdown_message(status_msg, "🔄 Uploading file...")
+            status_msg = await send_markdown_message(status_msg, "🔄 Uploading file...")
             
             # Upload file
             final_size = final_file.stat().st_size
@@ -533,7 +548,11 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                 
         except Exception as e:
             logger.error(f"Processing error: {e}")
-            await send_markdown_message(status_msg, f"❌ An error occurred: {str(e)}")
+            # Ensure status_msg is not None before trying to edit
+            if status_msg:
+                await send_markdown_message(status_msg, f"❌ An error occurred: {str(e)}")
+            else:
+                await update.message.reply_text(f"❌ An error occurred: {str(e)}")
     finally:
         # Clean up temporary directory
         try:
