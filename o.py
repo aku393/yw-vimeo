@@ -1,3 +1,5 @@
+# (Place this content into /opt/bot3/o.py, replacing the old file.)
+
 import json
 import logging
 import os
@@ -11,13 +13,13 @@ import re
 from base64 import b64decode
 from pathlib import Path
 from urllib.parse import urljoin
-from typing import Optional
+from typing import Optional, Union
 
 import requests
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
 from telegram.constants import ParseMode, ChatAction
 
@@ -52,37 +54,60 @@ def format_size(size_bytes: int) -> str:
 
 def escape_markdown(text: str) -> str:
     """Helper function to escape special Markdown v2 characters."""
-    # This pattern matches all characters that need to be escaped in Markdown V2.
+    # This pattern matches characters that should be escaped in Markdown V2.
     escape_chars = r'([_*[\]()~`>#+\-=|{}.!])'
     return re.sub(escape_chars, r'\\\1', text)
 
-async def send_markdown_message(update: Update | Message, text: str, reply_markup=None):
-    """Helper function to send and edit properly escaped MarkdownV2 messages.
-    
-    Returns the Message object for subsequent edits.
+async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text: str, reply_markup=None):
+    """
+    Send or edit a MarkdownV2 message depending on the object type.
+    Accepts Update, Message, or CallbackQuery.
+    Returns the resulting Message object (when possible) or None.
     """
     escaped_text = escape_markdown(text)
-    if isinstance(update, Update) and update.message:
-        return await update.message.reply_text(
-            escaped_text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=reply_markup
-        )
-    elif isinstance(update, Update) and update.callback_query:
-        return await update.callback_query.edit_message_text(
-            escaped_text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=reply_markup
-        )
-    # A new check to handle passing a Message object directly
-    elif isinstance(update, Message):
-        return await update.edit_message_text(
-            escaped_text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=reply_markup
-        )
-    else:
-        logger.error("Could not send markdown message, invalid update object.")
+    try:
+        # Update with a message (regular incoming message)
+        if isinstance(obj, Update):
+            if obj.callback_query:
+                # CallbackQuery inside Update
+                cq = obj.callback_query
+                try:
+                    # try edit the message the callback is attached to
+                    return await cq.edit_message_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
+                except Exception:
+                    # fallback to replying in chat
+                    return await obj.message.reply_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
+            elif obj.message:
+                # a plain Update with a message
+                return await obj.message.reply_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
+            else:
+                # unknown Update shape
+                return None
+
+        # Direct CallbackQuery object
+        if isinstance(obj, CallbackQuery):
+            try:
+                return await obj.edit_message_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
+            except Exception:
+                # can't edit -> try to reply in the chat
+                if obj.message:
+                    return await obj.message.reply_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
+                return None
+
+        # Direct Message object
+        if isinstance(obj, Message):
+            # Message.edit_text exists in PTB v20+, use that
+            try:
+                return await obj.edit_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
+            except Exception:
+                # fallback: reply to chat
+                return await obj.reply_text(escaped_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
+
+        # Unknown type
+        return None
+
+    except Exception as e:
+        logger.error(f"Error in send_markdown_message: {e}")
         return None
 
 # Validate required environment variables
@@ -90,7 +115,7 @@ if not BOT_TOKEN or not API_ID or not API_HASH:
     print("❌ Error: Missing required environment variables!")
     print("Please check your .env file and ensure these variables are set:")
     print("- BOT_TOKEN")
-    print("- API_ID") 
+    print("- API_ID")
     print("- API_HASH")
     exit(1)
 
@@ -259,9 +284,15 @@ def convert_mkv_to_mp4(input_path: Path, output_path: Path) -> bool:
 async def get_user_info(user_id: int):
     """Get user information to check if they have premium."""
     try:
-        if telethon_client and telethon_client.is_connected():
-            user = await telethon_client.get_entity(user_id)
-            return user.premium if hasattr(user, 'premium') else False
+        if telethon_client and getattr(telethon_client, "is_connected", None):
+            # telethon_client.is_connected may be coroutine or sync; try awaiting, else call
+            try:
+                connected = await telethon_client.is_connected()
+            except TypeError:
+                connected = telethon_client.is_connected()
+            if connected:
+                user = await telethon_client.get_entity(user_id)
+                return user.premium if hasattr(user, 'premium') else False
     except Exception as e:
         logger.error(f"Error getting user info: {e}")
     return False
@@ -344,18 +375,34 @@ If you encounter any issues, contact the bot administrator.
     await send_markdown_message(update, help_text)
 
 
+async def is_telethon_connected() -> bool:
+    """Helper to robustly check telethon client's connection state."""
+    if not telethon_client:
+        return False
+    try:
+        # may be coroutine or sync
+        try:
+            return await telethon_client.is_connected()
+        except TypeError:
+            return telethon_client.is_connected()
+    except Exception:
+        return False
+
+
 async def admin_command(update: Update, context: CallbackContext):
     """Admin only command to check bot status."""
     if ADMIN_USER_ID and update.effective_user.id != ADMIN_USER_ID:
         await send_markdown_message(update, "❌ You don't have permission to use this command.")
         return
     
+    telethon_connected = await is_telethon_connected()
+    
     status_text = "🔧 Admin Status Panel:\n\n"
     status_text += f"🤖 Bot Token: {'✅ Set' if BOT_TOKEN else '❌ Missing'}\n"
     status_text += f"🔑 API ID: {'✅ Set' if API_ID else '❌ Missing'}\n"
     status_text += f"🔒 API Hash: {'✅ Set' if API_HASH else '❌ Missing'}\n"
     status_text += f"🛠️ FFmpeg: {'✅ Available' if check_ffmpeg() else '❌ Missing'}\n"
-    status_text += f"📡 Telethon: {'✅ Connected' if telethon_client and telethon_client.is_connected() else '❌ Disconnected'}\n"
+    status_text += f"📡 Telethon: {'✅ Connected' if telethon_connected else '❌ Disconnected'}\n"
     status_text += f"📁 N_m3u8DL-RE: {'✅ Found' if os.path.exists(N_M3U8DL_RE_PATH) else '❌ Missing'}\n\n"
     status_text += f"📊 Limits:\n"
     status_text += f"• Free users: {format_size(FREE_USER_LIMIT)}\n"
@@ -367,21 +414,27 @@ async def admin_command(update: Update, context: CallbackContext):
 async def button_handler(update: Update, context: CallbackContext):
     """Handle inline keyboard button presses."""
     query = update.callback_query
+    if not query:
+        return
     await query.answer()
     
     if query.data == "help":
-        await help_command(query, context)
+        # call help_command with the Update (it will use Update.message or callback_query)
+        await help_command(update, context)
     elif query.data == "status":
         status_text = "🤖 Bot Status:\n\n"
         status_text += f"✅ Bot is running\n"
         status_text += f"{'✅' if check_ffmpeg() else '❌'} FFmpeg available\n"
-        status_text += f"{'✅' if telethon_client and telethon_client.is_connected() else '❌'} Telethon connected\n"
+        telethon_connected = await is_telethon_connected()
+        status_text += f"{'✅' if telethon_connected else '❌'} Telethon connected\n"
         
         await send_markdown_message(query, status_text)
 
 
 async def process_vimeo_url(update: Update, context: CallbackContext):
     """Process Vimeo playlist URL."""
+    if not update.message or not update.message.text:
+        return
     url = update.message.text.strip()
     user_id = update.effective_user.id
     
@@ -491,7 +544,10 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
             if check_ffmpeg():
                 if convert_mkv_to_mp4(mkv_path, mp4_path):
                     # Remove original MKV file
-                    mkv_path.unlink()
+                    try:
+                        mkv_path.unlink()
+                    except Exception:
+                        pass
                     final_file = mp4_path
                 else:
                     if status_msg:
@@ -509,7 +565,7 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
             final_size = final_file.stat().st_size
             
             # Use Telethon for files > 50MB, regular bot API for smaller files
-            if final_size > 50 * 1024 * 1024 and telethon_client and telethon_client.is_connected():
+            if final_size > 50 * 1024 * 1024 and telethon_client and await is_telethon_connected():
                 try:
                     if status_msg:
                         await send_markdown_message(status_msg, "🔄 Uploading large file via Telethon...")
@@ -568,7 +624,9 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
             if status_msg:
                 await send_markdown_message(status_msg, f"❌ An error occurred: {str(e)}")
             else:
-                await update.message.reply_text(f"❌ An error occurred: {str(e)}")
+                # fallback to sending plain text reply
+                if update and update.message:
+                    await update.message.reply_text(f"❌ An error occurred: {str(e)}")
     finally:
         # Clean up temporary directory
         try:
