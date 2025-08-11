@@ -401,7 +401,7 @@ async def admin_command(update: Update, context: CallbackContext):
     status_text += f"🔒 API Hash: {'✅ Set' if API_HASH else '❌ Missing'}\n"
     status_text += f"🛠️ FFmpeg: {'✅ Available' if check_ffmpeg() else '❌ Missing'}\n"
     status_text += f"📡 Telethon: {'✅ Connected' if telethon_connected else '❌ Disconnected'}\n"
-    status_text += f"📁 N_m3u8DL-RE: {'✅ Found' if os.path.exists(N_M3U8DL_RE_PATH) else '❌ Missing'}\n\n"
+    status_text += f"📁 N_m3u8DL-RE: {'✅ Found' if os.path.exists(N_M3u8DL_RE_PATH) else '❌ Missing'}\n\n"
     status_text += f"📊 Limits:\n"
     status_text += f"• Free users: {format_size(FREE_USER_LIMIT)}\n"
     status_text += f"• Premium users: {format_size(PREMIUM_USER_LIMIT)}\n"
@@ -495,11 +495,13 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
             
             # Download using N_m3u8DL-RE with improved error handling and logging
             try:
+                # Use the new `--save-dir` argument to specify the output location
                 command = [
                     N_M3U8DL_RE_PATH,
                     os.path.join(temp_dir, master_file),
                     "-M", "format=mkv",
-                    "--workDir", temp_dir
+                    "--save-dir", temp_dir,
+                    "--tmp-dir", os.path.join(temp_dir, "temp_downloads")
                 ]
                 
                 # Log the command being executed for debugging
