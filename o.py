@@ -422,24 +422,24 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
             
             # Edit the status message
             if status_msg:
-              status_msg = await send_markdown_message(status_msg, "🔄 Fetching playlist information.")
+                status_msg = await send_markdown_message(status_msg, "🔄 Fetching playlist information.")
             
             if not downloader.send_request():
                 if status_msg:
-                  await send_markdown_message(status_msg, "❌ Failed to fetch playlist. Check your URL.")
+                    await send_markdown_message(status_msg, "❌ Failed to fetch playlist. Check your URL.")
                 return
                 
             if not downloader.parse_playlist():
                 if status_msg:
-                  await send_markdown_message(status_msg, "❌ Failed to parse playlist.")
+                    await send_markdown_message(status_msg, "❌ Failed to parse playlist.")
                 return
             
             if status_msg:
-              status_msg = await send_markdown_message(status_msg, "🔄 Creating download playlists.")
+                status_msg = await send_markdown_message(status_msg, "🔄 Creating download playlists.")
             master_file, streams = downloader.save_media()
             
             if status_msg:
-              status_msg = await send_markdown_message(status_msg, "🔄 Starting download.")
+                status_msg = await send_markdown_message(status_msg, "🔄 Starting download.")
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
             
             # Download using N_m3u8DL-RE
@@ -452,17 +452,17 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                 ], check=True, capture_output=True)
             except subprocess.CalledProcessError as e:
                 if status_msg:
-                  await send_markdown_message(
-                      status_msg, 
-                      f"❌ Download failed: {e.stderr.decode() if e.stderr else 'Unknown error'}"
-                  )
+                    await send_markdown_message(
+                        status_msg, 
+                        f"❌ Download failed: {e.stderr.decode() if e.stderr else 'Unknown error'}"
+                    )
                 return
             
             # Find downloaded MKV file
             mkv_files = glob.glob(os.path.join(temp_dir, "*.mkv"))
             if not mkv_files:
                 if status_msg:
-                  await send_markdown_message(status_msg, "❌ No MKV file found after download.")
+                    await send_markdown_message(status_msg, "❌ No MKV file found after download.")
                 return
             
             mkv_path = Path(mkv_files[0])
@@ -478,14 +478,14 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                     f"{'Consider upgrading to Premium!' if not is_premium else 'File exceeds Premium limit!'}"
                 )
                 if status_msg:
-                  await send_markdown_message(status_msg, message_text)
+                    await send_markdown_message(status_msg, message_text)
                 return
             
             if status_msg:
-              status_msg = await send_markdown_message(
-                  status_msg, 
-                  f"🔄 Converting to MP4... ({format_size(file_size)})"
-              )
+                status_msg = await send_markdown_message(
+                    status_msg, 
+                    f"🔄 Converting to MP4... ({format_size(file_size)})"
+                )
             
             # Convert MKV to MP4
             if check_ffmpeg():
@@ -495,15 +495,15 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                     final_file = mp4_path
                 else:
                     if status_msg:
-                      await send_markdown_message(status_msg, "⚠️ Conversion failed, uploading MKV file...")
+                        await send_markdown_message(status_msg, "⚠️ Conversion failed, uploading MKV file...")
                     final_file = mkv_path
             else:
                 if status_msg:
-                  await send_markdown_message(status_msg, "⚠️ FFmpeg not available, uploading MKV file...")
+                    await send_markdown_message(status_msg, "⚠️ FFmpeg not available, uploading MKV file...")
                 final_file = mkv_path
             
             if status_msg:
-              status_msg = await send_markdown_message(status_msg, "🔄 Uploading file...")
+                status_msg = await send_markdown_message(status_msg, "🔄 Uploading file...")
             
             # Upload file
             final_size = final_file.stat().st_size
@@ -512,7 +512,7 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
             if final_size > 50 * 1024 * 1024 and telethon_client and telethon_client.is_connected():
                 try:
                     if status_msg:
-                      await send_markdown_message(status_msg, "🔄 Uploading large file via Telethon...")
+                        await send_markdown_message(status_msg, "🔄 Uploading large file via Telethon...")
                     await telethon_client.send_file(
                         update.effective_chat.id,
                         final_file,
@@ -525,7 +525,7 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                 except Exception as e:
                     logger.error(f"Telethon upload failed: {e}")
                     if status_msg:
-                      await send_markdown_message(status_msg, "❌ Upload failed via Telethon. File might be too large.")
+                        await send_markdown_message(status_msg, "❌ Upload failed via Telethon. File might be too large.")
                     return
             else:
                 # Use regular bot API
@@ -544,11 +544,11 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                 except Exception as e:
                     logger.error(f"Bot API upload failed: {e}")
                     if status_msg:
-                      await send_markdown_message(status_msg, "❌ Upload failed. File might be too large for bot API.")
+                        await send_markdown_message(status_msg, "❌ Upload failed. File might be too large for bot API.")
                     return
             
             if status_msg:
-              await send_markdown_message(status_msg, "✅ Complete! File uploaded successfully.")
+                await send_markdown_message(status_msg, "✅ Complete! File uploaded successfully.")
             
             # Cleanup temp files
             for stream in streams:
