@@ -501,7 +501,8 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                     os.path.join(temp_dir, master_file),
                     "-M", "format=mkv",
                     "--save-dir", temp_dir,
-                    "--tmp-dir", os.path.join(temp_dir, "temp_downloads")
+                    "--tmp-dir", os.path.join(temp_dir, "temp_downloads"),
+                    "--log-level", "DEBUG" # This will provide more detailed logs
                 ]
                 
                 # Log the command being executed for debugging
