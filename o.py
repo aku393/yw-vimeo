@@ -1,5 +1,3 @@
-# (Place this content into /opt/bot3/o.py, replacing the old file.)
-
 import json
 import logging
 import os
@@ -35,7 +33,7 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0")) if os.getenv("ADMIN_USER_ID
 
 # Bot limits (convert GB to bytes)
 FREE_USER_LIMIT = int(os.getenv("FREE_USER_LIMIT_GB", "2")) * 1024 * 1024 * 1024
-PREMIUM_USER_LIMIT = int(os.getenv("PREMIUM_USER_LIMIT_GB", "4")) * 1024 * 1024 * 1024
+PREMIUM_USER_LIMIT = int(os.getenv("PREMIUM_LIMIT_GB", "4")) * 1024 * 1024 * 1024
 
 # File paths
 N_M3U8DL_RE_PATH = os.getenv("N_M3U8DL_RE_PATH", "./N_m3u8DL-RE")
@@ -495,20 +493,46 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
                 status_msg = await send_markdown_message(status_msg, "🔄 Starting download.")
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
             
-            # Download using N_m3u8DL-RE
+            # Download using N_m3u8DL-RE with improved error handling and logging
             try:
-                subprocess.run([
+                command = [
                     N_M3U8DL_RE_PATH,
                     os.path.join(temp_dir, master_file),
                     "-M", "format=mkv",
                     "--workDir", temp_dir
-                ], check=True, capture_output=True)
+                ]
+                
+                # Log the command being executed for debugging
+                logger.info(f"Executing N_m3u8DL-RE command: {' '.join(command)}")
+                
+                process_result = subprocess.run(
+                    command,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=3600  # Set a timeout for the download process (e.g., 1 hour)
+                )
+                
+                logger.info(f"N_m3u8DL-RE stdout:\n{process_result.stdout}")
+                
             except subprocess.CalledProcessError as e:
+                logger.error(f"N_m3u8DL-RE failed. Return code: {e.returncode}")
+                logger.error(f"N_m3u8DL-RE stderr:\n{e.stderr}")
                 if status_msg:
                     await send_markdown_message(
                         status_msg, 
-                        f"❌ Download failed: {e.stderr.decode() if e.stderr else 'Unknown error'}"
+                        f"❌ Download failed\\. Error: ```{e.stderr.strip()}```"
                     )
+                return
+            except subprocess.TimeoutExpired:
+                logger.error("N_m3u8DL-RE process timed out.")
+                if status_msg:
+                    await send_markdown_message(status_msg, "❌ The download process timed out.")
+                return
+            except Exception as e:
+                logger.error(f"An unexpected error occurred during N_m3u8DL-RE execution: {e}")
+                if status_msg:
+                    await send_markdown_message(status_msg, f"❌ An unexpected error occurred during download: {str(e)}")
                 return
             
             # Find downloaded MKV file
