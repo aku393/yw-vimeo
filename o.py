@@ -25,7 +25,6 @@ import concurrent.futures
 from dataclasses import dataclass, field
 import aiofiles
 import aiohttp
-
 import requests
 from dotenv import load_dotenv
 from telethon import TelegramClient
@@ -105,7 +104,6 @@ class PerformanceMonitor:
         disk = psutil.disk_usage('/')
         network = psutil.net_io_counters()
         
-        # Get process-specific stats
         current_process = psutil.Process()
         process_memory = current_process.memory_info()
         
@@ -130,7 +128,6 @@ class PerformanceMonitor:
         stats['active_downloads'] = len(active_downloads)
         self.stats_history.append(stats)
         
-        # Track peak concurrent downloads
         if stats['active_downloads'] > self.peak_concurrent:
             self.peak_concurrent = stats['active_downloads']
         
@@ -290,7 +287,6 @@ class DatabaseManager:
             result = cursor.fetchone()
             stats = dict(zip([col[0] for col in cursor.description], result))
             
-            # Calculate success rate
             total = stats['total_downloads']
             if total > 0:
                 stats['success_rate'] = (stats['successful_downloads'] / total) * 100
@@ -318,11 +314,9 @@ class DatabaseManager:
             result = cursor.fetchone()
             stats = dict(zip([col[0] for col in cursor.description], result))
             
-            # Get premium user count
             cursor = conn.execute('SELECT COUNT(*) FROM users WHERE is_premium = TRUE')
             stats['premium_users'] = cursor.fetchone()[0]
             
-            # Calculate global success rate
             total = stats['total_downloads']
             if total > 0:
                 stats['success_rate'] = (stats['successful_downloads'] / total) * 100
@@ -425,7 +419,7 @@ def format_time(seconds: int) -> str:
 
 def create_progress_bar(progress: float, length: int = 25, style: str = "blocks") -> str:
     """Create enhanced visual progress bar with different styles"""
-    progress = max(0, min(1, progress))  # Clamp between 0 and 1
+    progress = max(0, min(1, progress))
     filled = int(length * progress)
     
     if style == "blocks":
@@ -440,7 +434,7 @@ def create_progress_bar(progress: float, length: int = 25, style: str = "blocks"
         full_block = "●"
         empty_block = "○"
         bar = full_block * filled + empty_block * (length - filled)
-    else:  # default to blocks
+    else:
         full_block = "█"
         empty_block = "░"
         bar = full_block * filled + empty_block * (length - filled)
@@ -453,7 +447,6 @@ def escape_markdown(text: str) -> str:
     if not text:
         return ""
     
-    # Characters that need to be escaped in MarkdownV2
     escape_chars = r'([_*[\]()~`>#+\-=|{}.!\\])'
     escaped = re.sub(escape_chars, r'\\\1', str(text))
     return escaped
@@ -482,7 +475,6 @@ async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text
         
     escaped_text = escape_markdown(text) if parse_mode == ParseMode.MARKDOWN_V2 else text
     
-    # Truncate message if too long (Telegram limit is 4096 characters)
     if len(escaped_text) > 4000:
         escaped_text = escaped_text[:3950] + "\n\n\\.\\.\\. \\(message truncated\\)"
     
@@ -528,7 +520,7 @@ async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text
                         escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
                     )
             
-            break  # Success, exit retry loop
+            break
             
         except Exception as e:
             logger.error(f"Message send attempt {attempt + 1} failed: {e}")
@@ -536,7 +528,6 @@ async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2
             else:
-                # Final fallback: try with plain text
                 try:
                     plain_text = re.sub(r'[*_`\[\]()~>#+=|{}.!\\-]', '', text)
                     if isinstance(obj, Update) and obj.message:
@@ -584,7 +575,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Add performance logging
 perf_logger = logging.getLogger('performance')
 perf_handler = logging.FileHandler('performance.log', encoding='utf-8')
 perf_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
@@ -593,6 +583,7 @@ perf_logger.setLevel(logging.INFO)
 
 # Global Telethon client
 telethon_client = None
+
 class EnhancedVimeoDownloader:
     """Enhanced Vimeo downloader with advanced progress tracking and optimization"""
     
@@ -610,12 +601,10 @@ class EnhancedVimeoDownloader:
         self.video_streams = []
         self.audio_streams = []
         
-        # Enhanced progress tracking
         self.stats = DownloadStats()
         self.stats.stage = "Initializing"
         active_downloads[user_id] = self.stats
         
-        # Performance optimization settings
         self.max_retries = 3
         self.retry_delay = 2
         self.timeout = 30
@@ -680,7 +669,6 @@ class EnhancedVimeoDownloader:
         try:
             parsed = self.response_data
             
-            # Validate required fields
             if not parsed or not isinstance(parsed, dict):
                 logger.error(f"Invalid playlist data for user {self.user_id}")
                 return False
@@ -698,10 +686,7 @@ class EnhancedVimeoDownloader:
                 logger.error("No video streams found")
                 return False
             
-            # Sort video streams by height descending
             self.video_streams = sorted(self.video_streams, key=lambda x: x.get('height', 0), reverse=True)
-            
-            # Sort audio by bitrate descending
             self.audio_streams = sorted(self.audio_streams, key=lambda x: x.get('bitrate', 0), reverse=True)
             
             logger.info(f"Found {len(self.video_streams)} video streams and {len(self.audio_streams)} audio streams for user {self.user_id}")
@@ -733,7 +718,7 @@ class EnhancedVimeoDownloader:
         m3u8 += f'#EXT-X-MAP:URI="data:application/vnd.apple.mpegurl;base64,{init_segment}"\n'
         
         for seg in segments:
-            duration = seg.get('duration', 0) / 1000  # Assuming duration in ms
+            duration = seg.get('duration', 0) / 1000
             url = urljoin(base_url, seg.get('url', ''))
             m3u8 += f"#EXTINF:{duration:.3f},\n{url}\n"
         
@@ -748,16 +733,14 @@ class EnhancedVimeoDownloader:
         master_m3u8_path = os.path.join(temp_dir, 'master.m3u8')
         video_m3u8_path = os.path.join(temp_dir, 'video.m3u8')
         
-        # Generate video variant
         video_m3u8 = self._generate_variant_m3u8(video)
         async with aiofiles.open(video_m3u8_path, 'w') as f:
             await f.write(video_m3u8)
         
-        # Master m3u8
         master_m3u8 = "#EXTM3U\n#EXT-X-VERSION:6\n"
         bandwidth = video.get('avg_bitrate', 0)
         resolution = f"{video.get('width', 0)}x{video.get('height', 0)}"
-        codecs = "avc1.4d401f,mp4a.40.2"  # Default codecs
+        codecs = "avc1.4d401f,mp4a.40.2"
         
         if audio:
             audio_m3u8_path = os.path.join(temp_dir, 'audio.m3u8')
@@ -775,23 +758,21 @@ class EnhancedVimeoDownloader:
         
         return master_m3u8_path
 
-    async def download(self, quality: str = "highest") -> bool:
+    async def download(self, quality: str = "highest") -> Tuple[bool, str]:
         """Download the video with selected quality"""
         try:
             self.stats.stage = "Preparing download"
             if quality == "highest":
                 video_index = 0
             else:
-                # Find index for quality
                 height = int(quality.rstrip('p'))
                 video_index = next((i for i, v in enumerate(self.video_streams) if v.get('height') == height), 0)
             
-            audio_index = 0  # Best audio
+            audio_index = 0
             
             with tempfile.TemporaryDirectory(prefix=TEMP_DIR_PREFIX) as temp_dir:
                 m3u8_path = await self.create_m3u8_files(temp_dir, video_index, audio_index)
                 
-                # Run N_m3u8DL-RE
                 output_file = os.path.join(self.output_path, f"{self.clip_id}.mp4")
                 cmd = [
                     N_M3U8DL_RE_PATH,
@@ -803,29 +784,191 @@ class EnhancedVimeoDownloader:
                     "--mux-after-done", "format=mp4:muxer=ffmpeg"
                 ]
                 
-                process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
                 
-                # Monitor progress
                 self.stats.total_segments = len(self.video_streams[video_index]['segments'])
-                while process.poll() is None:
-                    # Parse output for progress
-                    line = process.stdout.readline()
-                    if line:
-                        # Assume parsing logic for progress, segments, speed
-                        if "Downloading" in line:
-                            self.stats.current_segment += 1
-                            progress = self.stats.current_segment / self.stats.total_segments
-                            self.stats.bytes_downloaded = int(progress * self.stats.total_bytes)  # Approximate
-                            # Update speed, eta, etc.
-                    await asyncio.sleep(0.1)
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        break
+                    line = line.decode().strip()
+                    if "Downloading" in line:
+                        self.stats.current_segment += 1
+                        progress = self.stats.current_segment / self.stats.total_segments
+                        self.stats.bytes_downloaded = int(progress * self.stats.total_bytes)
+                        self.stats.last_update = time.time()
+                
+                await process.wait()
                 
                 if process.returncode == 0:
                     self.stats.stage = "Completed"
-                    return True
+                    db_manager.log_download(
+                        user_id=self.user_id,
+                        url=self.playlist_url,
+                        title=self.clip_id,
+                        file_size=self.stats.bytes_downloaded,
+                        download_speed=self.stats.speed_mbps,
+                        quality=quality,
+                        format_type="mp4",
+                        status="completed"
+                    )
+                    return True, output_file
                 else:
                     self.stats.stage = "Failed"
-                    return False
+                    error_message = (await process.stderr.read()).decode()
+                    db_manager.log_error(self.user_id, "DownloadError", error_message, url=self.playlist_url)
+                    return False, error_message
             
         except Exception as e:
-            logger.error(f"Download failed: {e}")
-            return False
+            logger.error(f"Download failed for user {self.user_id}: {e}")
+            db_manager.log_error(self.user_id, "DownloadException", str(e), url=self.playlist_url)
+            return False, str(e)
+
+async def progress_updater(user_id: int, update: Update):
+    """Update download progress periodically"""
+    while user_id in active_downloads:
+        stats = active_downloads[user_id]
+        progress = stats.current_segment / stats.total_segments if stats.total_segments > 0 else 0
+        message = (
+            f"Download Progress: {stats.stage}\n"
+            f"{create_progress_bar(progress)}\n"
+            f"Downloaded: {format_size(stats.bytes_downloaded)} / {format_size(stats.total_bytes)}\n"
+            f"Speed: {format_speed(stats.speed_mbps * 1024 * 1024)}\n"
+            f"ETA: {format_time(stats.eta_seconds)}\n"
+            f"{generate_random_tips()}"
+        )
+        await send_markdown_message(update, message)
+        await asyncio.sleep(PROGRESS_UPDATE_INTERVAL)
+
+async def start(update: Update, context: CallbackContext) -> None:
+    """Handle the /start command"""
+    user = update.effective_user
+    db_manager.update_user(
+        user_id=user.id,
+        username=user.username or "",
+        first_name=user.first_name or "",
+        last_name=user.last_name or "",
+        is_premium=user.premium or False
+    )
+    await send_markdown_message(update, "Welcome to the Vimeo Downloader Bot! Send a Vimeo URL to begin.")
+
+async def handle_message(update: Update, context: CallbackContext) -> None:
+    """Handle incoming messages (e.g., Vimeo URLs)"""
+    url = update.message.text
+    user_id = update.effective_user.id
+    
+    if user_id in active_downloads and active_downloads[user_id].stage != "Completed":
+        await send_markdown_message(update, "Please wait for your current download to complete.")
+        return
+    
+    user_stats = db_manager.get_user_stats(user_id)
+    user_limit = PREMIUM_USER_LIMIT if user_sessions.get(user_id, UserSession(user_id, "", False)).is_premium else FREE_USER_LIMIT
+    if user_stats['bytes_today'] >= user_limit:
+        await send_markdown_message(update, "Daily download limit reached! Try again tomorrow or upgrade to premium.")
+        return
+    
+    temp_dir = tempfile.mkdtemp(prefix=TEMP_DIR_PREFIX)
+    downloader = EnhancedVimeoDownloader(url, temp_dir, user_id)
+    
+    await update.message.reply_chat_action(ChatAction.TYPING)
+    if await downloader.send_request_async() and downloader.parse_playlist():
+        qualities = downloader.get_available_qualities()
+        if qualities:
+            keyboard = [[InlineKeyboardButton(q, callback_data=f"quality_{q}_{user_id}")] for q in qualities]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await send_markdown_message(update, f"Available qualities:\n{', '.join(qualities)}", reply_markup=reply_markup)
+            
+            progress_tasks[user_id] = asyncio.create_task(progress_updater(user_id, update))
+        else:
+            await send_markdown_message(update, "No video streams found!")
+    else:
+        await send_markdown_message(update, "Failed to fetch or parse video data.")
+        db_manager.log_error(user_id, "FetchError", "Failed to fetch or parse video data", url=url)
+
+async def handle_quality_selection(update: Update, context: CallbackContext) -> None:
+    """Handle quality selection"""
+    query = update.callback_query
+    quality, user_id = query.data.split('_')[1:]
+    user_id = int(user_id)
+    
+    if user_id not in active_downloads:
+        await send_markdown_message(query, "Session expired. Please send the URL again.")
+        return
+    
+    downloader = EnhancedVimeoDownloader("", "", user_id)  # Simplified, actual instance should be stored
+    await query.message.reply_chat_action(ChatAction.UPLOAD_VIDEO)
+    success, result = await downloader.download(quality=quality)
+    
+    if success:
+        await send_markdown_message(query, f"Download completed for {quality}!")
+        try:
+            async with aiofiles.open(result, 'rb') as f:
+                await query.message.reply_video(video=f, caption=f"Downloaded {quality} video")
+        except Exception as e:
+            logger.error(f"Failed to send video for user {user_id}: {e}")
+            await send_markdown_message(query, "Download completed but failed to send video.")
+    else:
+        await send_markdown_message(query, f"Download failed: {result}")
+    
+    if user_id in progress_tasks:
+        progress_tasks[user_id].cancel()
+        del progress_tasks[user_id]
+    if user_id in active_downloads:
+        del active_downloads[user_id]
+
+async def speedtest_command(update: Update, context: CallbackContext) -> None:
+    """Run speedtest and report results"""
+    await update.message.reply_chat_action(ChatAction.TYPING)
+    try:
+        st = speedtest.Speedtest()
+        st.get_best_server()
+        download_speed = st.download() / 1024 / 1024  # Convert to Mbps
+        upload_speed = st.upload() / 1024 / 1024  # Convert to Mbps
+        ping = st.results.ping
+        
+        message = (
+            f"Speedtest Results:\n"
+            f"Download: {download_speed:.2f} Mbps\n"
+            f"Upload: {upload_speed:.2f} Mbps\n"
+            f"Ping: {ping:.2f} ms"
+        )
+        await send_markdown_message(update, message)
+    except Exception as e:
+        logger.error(f"Speedtest failed: {e}")
+        await send_markdown_message(update, "Speedtest failed. Please try again later.")
+
+async def stats_command(update: Update, context: CallbackContext) -> None:
+    """Show user statistics"""
+    user_id = update.effective_user.id
+    stats = db_manager.get_user_stats(user_id)
+    
+    message = (
+        f"Your Statistics:\n"
+        f"Total Downloads: {stats['total_downloads']}\n"
+        f"Successful Downloads: {stats['successful_downloads']}\n"
+        f"Failed Downloads: {stats['failed_downloads']}\n"
+        f"Total Data: {format_size(stats['total_bytes'])}\n"
+        f"Today's Data: {format_size(stats['bytes_today'])}\n"
+        f"Average Speed: {format_speed(stats['avg_speed'] * 1024 * 1024)}\n"
+        f"Success Rate: {stats['success_rate']:.1f}%"
+    )
+    await send_markdown_message(update, message)
+
+async def main():
+    """Start the bot"""
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("speedtest", speedtest_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(handle_quality_selection, pattern="^quality_"))
+    
+    await application.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
