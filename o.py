@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# o.py - Updated and fixed version
+# o.py - Updated and fixed version (progress updates deduplicated & rate-limited)
 
 import json
 import logging
@@ -57,7 +57,8 @@ TEMP_DIR_PREFIX = os.getenv("TEMP_DIR_PREFIX", "vimeo_bot_temp_")
 
 # Enhanced Configuration
 MAX_CONCURRENT_DOWNLOADS = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "5"))
-PROGRESS_UPDATE_INTERVAL = float(os.getenv("PROGRESS_UPDATE_INTERVAL", "2.0"))
+PROGRESS_UPDATE_INTERVAL = float(os.getenv("PROGRESS_UPDATE_INTERVAL", "3.0"))  # seconds between edits
+MIN_PROGRESS_DELTA = float(os.getenv("MIN_PROGRESS_DELTA", "0.01"))  # 1% change required to edit
 DB_PATH = os.getenv("DB_PATH", "vimeo_bot.db")
 ANALYTICS_ENABLED = os.getenv("ANALYTICS_ENABLED", "true").lower() == "true"
 CACHE_SIZE = int(os.getenv("CACHE_SIZE", "100"))
@@ -314,8 +315,9 @@ class DatabaseManager:
             else:
                 stats = dict(zip([col[0] for col in cursor.description], result))
             
-            cursor = conn.execute('SELECT COUNT(*) FROM users WHERE is_premium = TRUE')
-            stats['premium_users'] = cursor.fetchone()[0] if cursor.fetchone() else 0
+            cursor2 = conn.execute('SELECT COUNT(*) FROM users WHERE is_premium = TRUE')
+            premium_count_row = cursor2.fetchone()
+            stats['premium_users'] = premium_count_row[0] if premium_count_row else 0
             
             total = stats.get('total_downloads', 0)
             if total > 0:
@@ -372,6 +374,7 @@ user_sessions: Dict[int, UserSession] = {}
 download_queue = asyncio.Queue(maxsize=MAX_CONCURRENT_DOWNLOADS * 2)
 progress_tasks: Dict[int, asyncio.Task] = {}
 session_downloaders: Dict[int, "EnhancedVimeoDownloader"] = {}  # store active downloader instances
+progress_message_ids: Dict[int, Tuple[int, int]] = {}  # user_id -> (chat_id, message_id)
 
 def format_size(size_bytes: int) -> str:
     """Format file size in human readable format with more precision"""
@@ -476,21 +479,23 @@ def generate_random_tips() -> str:
 
 async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text: str, 
                                reply_markup=None, parse_mode=ParseMode.MARKDOWN_V2) -> Optional[Message]:
-    """Enhanced message sending with comprehensive error handling and fallbacks"""
+    """Enhanced message sending with comprehensive error handling and fallbacks.
+       This function will try to edit messages where appropriate to avoid duplicates."""
     if not text:
         return None
         
     escaped_text = escape_markdown(text) if parse_mode == ParseMode.MARKDOWN_V2 else text
     
-    if len(escaped_text) > 4000:
-        escaped_text = escaped_text[:3950] + "\n\n\\.\\.\\. \\(message truncated\\)"
+    # Telegram has a ~4096 char limit; trim if necessary
+    if len(escaped_text) > 3900:
+        escaped_text = escaped_text[:3890] + "\n\n\\.\\.\\. \\(message truncated\\)"
     
     max_retries = 3
     retry_delay = 1
     
     for attempt in range(max_retries):
         try:
-            # Update message when possible (callback/query), otherwise send a new message
+            # If Update with callback_query: try to edit callback's message first
             if isinstance(obj, Update):
                 if obj.callback_query:
                     try:
@@ -519,6 +524,7 @@ async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text
                         )
 
             elif isinstance(obj, Message):
+                # Try to edit if it's an existing message (if allowed), else reply
                 try:
                     return await obj.edit_text(
                         escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
@@ -527,8 +533,9 @@ async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text
                     return await obj.reply_text(
                         escaped_text, parse_mode=parse_mode, reply_markup=reply_markup
                     )
-            
-            break
+            else:
+                # fallback: we don't have a message object - nothing to do
+                return None
             
         except Exception as e:
             logger.error(f"Message send attempt {attempt + 1} failed: {e}")
@@ -537,7 +544,7 @@ async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text
                 retry_delay *= 2
             else:
                 try:
-                    # Fallback: send plain text without markdown or special chars
+                    # Final fallback: send plain text without special markdown
                     plain_text = re.sub(r'[*_`\[\]()~>#+=|{}.!\\-]', '', text)
                     if isinstance(obj, Update) and obj.message:
                         return await obj.message.reply_text(plain_text)
@@ -547,7 +554,6 @@ async def send_markdown_message(obj: Union[Update, Message, CallbackQuery], text
                         return await obj.message.reply_text(plain_text)
                 except Exception as final_error:
                     logger.error(f"All message send attempts failed: {final_error}")
-    
     return None
 
 # Validate required environment variables
@@ -661,7 +667,6 @@ class EnhancedVimeoDownloader:
                             except json.JSONDecodeError:
                                 # Some Vimeo JSONs may be embedded - try to extract
                                 try:
-                                    # attempt to find JSON substring
                                     match = re.search(r'({".*"})', content, re.DOTALL)
                                     if match:
                                         self.response_data = json.loads(match.group(1))
@@ -841,6 +846,7 @@ class EnhancedVimeoDownloader:
                 
                 # read stdout to estimate progress
                 self.stats.total_segments = len(self.video_streams[video_index].get('segments', []))
+                self.stats.stage = "Downloading"
                 while True:
                     line = await process.stdout.readline()
                     if not line:
@@ -850,10 +856,12 @@ class EnhancedVimeoDownloader:
                     except Exception:
                         decoded = ""
                     # crude heuristics to update progress
-                    if "Downloading" in decoded or "downloaded" in decoded.lower():
-                        self.stats.current_segment = min(self.stats.current_segment + 1, self.stats.total_segments)
+                    if "Downloading" in decoded or "downloaded" in decoded.lower() or "segment" in decoded.lower():
+                        self.stats.current_segment = min(self.stats.current_segment + 1, max(1, self.stats.total_segments))
                         progress = (self.stats.current_segment / max(1, self.stats.total_segments))
-                        self.stats.bytes_downloaded = int(progress * (self.stats.total_bytes or (50 * 1024 * 1024)))
+                        # estimate bytes if total unknown
+                        estimated_total = self.stats.total_bytes or (50 * 1024 * 1024)
+                        self.stats.bytes_downloaded = int(progress * estimated_total)
                         self.stats.last_update = time.time()
                 
                 await process.wait()
@@ -880,27 +888,88 @@ class EnhancedVimeoDownloader:
         except Exception as e:
             logger.error(f"Download failed for user {self.user_id}: {e}")
             db_manager.log_error(self.user_id, "DownloadException", str(e), url=self.playlist_url)
+            self.stats.stage = "Failed"
             return False, str(e)
 
-async def progress_updater(user_id: int, update: Update):
-    """Update download progress periodically"""
-    while user_id in active_downloads:
-        stats = active_downloads[user_id]
-        progress = stats.current_segment / stats.total_segments if stats.total_segments > 0 else 0
-        # stats.speed_mbps is Mb/s; convert to bytes/sec for formatting (approx)
-        bytes_per_sec = stats.speed_mbps * 1024 * 1024 if stats.speed_mbps else 0
-        message = (
-            f"Download Progress: {escape_markdown(stats.stage)}\n"
-            f"{create_progress_bar(progress)}\n"
-            f"Downloaded: {format_size(stats.bytes_downloaded)} / {format_size(stats.total_bytes)}\n"
-            f"Speed: {format_speed(bytes_per_sec)}\n"
-            f"ETA: {format_time(stats.eta_seconds)}\n\n"
-            f"{generate_random_tips()}"
-        )
+async def progress_updater(user_id: int, chat_id: int, initial_message: Message = None):
+    """Update download progress periodically by editing a single message.
+       - Only edits message when progress changes by >= MIN_PROGRESS_DELTA or stage changes.
+       - Stops when stage is Completed or Failed."""
+    last_progress = -1.0
+    last_stage = None
+    last_edit_time = 0.0
+    message_obj = initial_message  # Message object to edit
+    # If we don't have initial message, we'll post one and then edit it
+    if message_obj is None:
+        # create a dummy minimal Message-like object by sending a message to the chat
         try:
-            await send_markdown_message(update, message)
-        except Exception as e:
-            logger.debug(f"Progress update send failed for user {user_id}: {e}")
+            # the bot's Application is not globally available in this function, we'll use stored message id map
+            # if no message is present, nothing to edit — bail out
+            return
+        except Exception:
+            return
+
+    while True:
+        if user_id not in active_downloads:
+            # no active download, finalize message and exit
+            try:
+                await send_markdown_message(message_obj, f"Download session ended or cleared.")
+            except Exception:
+                pass
+            break
+
+        stats = active_downloads.get(user_id)
+        if not stats:
+            break
+
+        progress = (stats.current_segment / stats.total_segments) if stats.total_segments > 0 else 0.0
+        # decide whether to edit:
+        time_now = time.time()
+        progress_delta = abs(progress - last_progress)
+        stage_changed = (stats.stage != last_stage)
+
+        should_edit = False
+        if stage_changed:
+            should_edit = True
+        elif progress_delta >= MIN_PROGRESS_DELTA and (time_now - last_edit_time) >= PROGRESS_UPDATE_INTERVAL:
+            should_edit = True
+        elif (time_now - last_edit_time) >= (PROGRESS_UPDATE_INTERVAL * 5):
+            # periodic heartbeat even if tiny changes (every 5 intervals)
+            should_edit = True
+
+        if should_edit:
+            bytes_per_sec = stats.speed_mbps * 1024 * 1024 if stats.speed_mbps else 0
+            message_text = (
+                f"Download Progress: {escape_markdown(stats.stage)}\n"
+                f"{create_progress_bar(progress)}\n"
+                f"Downloaded: {format_size(stats.bytes_downloaded)} / {format_size(stats.total_bytes)}\n"
+                f"Speed: {format_speed(bytes_per_sec)}\n"
+                f"ETA: {format_time(stats.eta_seconds)}\n\n"
+                f"{generate_random_tips()}"
+            )
+            try:
+                await send_markdown_message(message_obj, message_text)
+            except Exception as e:
+                logger.debug(f"Failed to edit progress message for user {user_id}: {e}")
+            last_progress = progress
+            last_stage = stats.stage
+            last_edit_time = time_now
+
+        # stop if completed or failed
+        if stats.stage in ("Completed", "Failed"):
+            final_text = f"Download {stats.stage}.\nDownloaded: {format_size(stats.bytes_downloaded)}"
+            try:
+                await send_markdown_message(message_obj, final_text)
+            except Exception:
+                pass
+            # clean active download state
+            try:
+                if user_id in active_downloads:
+                    del active_downloads[user_id]
+            except Exception:
+                pass
+            break
+
         await asyncio.sleep(PROGRESS_UPDATE_INTERVAL)
 
 async def start(update: Update, context: CallbackContext) -> None:
@@ -957,15 +1026,18 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
         if qualities:
             keyboard = [[InlineKeyboardButton(q, callback_data=f"quality_{q}_{user_id}")] for q in qualities]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await send_markdown_message(update, f"Available qualities:\n{', '.join(qualities)}", reply_markup=reply_markup)
+            msg = await send_markdown_message(update, f"Available qualities:\n{', '.join(qualities)}", reply_markup=reply_markup)
             
-            # start progress updater
+            # start or restart progress updater tied to this message (we will edit this message as the progress target)
             if user_id in progress_tasks:
                 try:
                     progress_tasks[user_id].cancel()
                 except Exception:
                     pass
-            progress_tasks[user_id] = asyncio.create_task(progress_updater(user_id, update))
+                del progress_tasks[user_id]
+            # store message info to be used by progress_updater (we pass msg)
+            if msg:
+                progress_tasks[user_id] = asyncio.create_task(progress_updater(user_id, msg.chat_id, initial_message=msg))
         else:
             await send_markdown_message(update, "No video streams found!")
     else:
@@ -999,22 +1071,32 @@ async def handle_quality_selection(update: Update, context: CallbackContext) -> 
         await send_markdown_message(query, "Session expired. Please send the URL again.")
         return
 
+    # cancel existing progress updater if any, we'll start a new one pointing at this callback's message
+    if user_id in progress_tasks:
+        try:
+            progress_tasks[user_id].cancel()
+        except Exception:
+            pass
+        del progress_tasks[user_id]
+
     await query.message.reply_chat_action(ChatAction.UPLOAD_VIDEO)
+    # start progress updater that will edit this callback message; create a copy of message to edit
+    progress_tasks[user_id] = asyncio.create_task(progress_updater(user_id, query.message.chat_id, initial_message=query.message))
+
     success, result = await downloader.download(quality=quality)
     
     if success:
-        await send_markdown_message(query, f"Download completed for {quality}!")
+        await send_markdown_message(query, f"✅ Download completed for {quality}!")
         # try to send the resulting file (non-blocking)
         try:
-            # telegram bot library expects file path or file-like object;
-            # using send_document to avoid video-specific conversion complexities
             await query.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
+            # reply with a document using the file path
             await query.message.reply_document(document=open(result, 'rb'), caption=f"Downloaded {quality} video")
         except Exception as e:
             logger.error(f"Failed to send video for user {user_id}: {e}")
             await send_markdown_message(query, "Download completed but failed to send video. You can retrieve it from the server.")
     else:
-        await send_markdown_message(query, f"Download failed: {escape_markdown(str(result))}")
+        await send_markdown_message(query, f"❌ Download failed: {escape_markdown(str(result))}")
     
     # cleanup tasks and state
     if user_id in progress_tasks:
@@ -1029,7 +1111,6 @@ async def handle_quality_selection(update: Update, context: CallbackContext) -> 
         except Exception:
             pass
     if user_id in session_downloaders:
-        # don't delete immediately if file still in use; keep for manual cleanup
         try:
             del session_downloaders[user_id]
         except Exception:
