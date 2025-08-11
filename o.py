@@ -40,7 +40,17 @@ TEMP_DIR_PREFIX = os.getenv("TEMP_DIR_PREFIX", "vimeo_bot_temp_")
 
 # Validate required environment variables
 if not BOT_TOKEN or not API_ID or not API_HASH:
-    raise ValueError("Missing required environment variables: BOT_TOKEN, API_ID, API_HASH")
+    print("❌ Error: Missing required environment variables!")
+    print("Please check your .env file and ensure these variables are set:")
+    print("- BOT_TOKEN")
+    print("- API_ID") 
+    print("- API_HASH")
+    exit(1)
+
+print(f"✅ Configuration loaded successfully!")
+print(f"📊 Free user limit: {format_size(FREE_USER_LIMIT)}")
+print(f"📊 Premium user limit: {format_size(PREMIUM_USER_LIMIT)}")
+print(f"📁 N_m3u8DL-RE path: {N_M3U8DL_RE_PATH}")
 
 # Setup logging
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
@@ -215,6 +225,20 @@ def get_file_size_limit(is_premium: bool) -> int:
     return PREMIUM_USER_LIMIT if is_premium else FREE_USER_LIMIT
 
 
+def check_n_m3u8dl_re():
+    """Check if N_m3u8DL-RE is available."""
+    if not os.path.exists(N_M3U8DL_RE_PATH):
+        return False
+    
+    try:
+        # Test if the file is executable
+        result = subprocess.run([N_M3U8DL_RE_PATH, "--help"], 
+                              capture_output=True, timeout=10)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def format_size(size_bytes: int) -> str:
     """Format file size in human readable format."""
     if size_bytes < 1024:
@@ -347,6 +371,15 @@ async def process_vimeo_url(update: Update, context: CallbackContext):
     if not url.startswith('https://') or 'playlist.json' not in url:
         await update.message.reply_text(
             "❌ Invalid URL! Please send a valid Vimeo playlist.json URL."
+        )
+        return
+    
+    # Check if N_m3u8DL-RE is available
+    if not check_n_m3u8dl_re():
+        await update.message.reply_text(
+            f"❌ N_m3u8DL-RE not found at: `{N_M3U8DL_RE_PATH}`\n\n"
+            "Please ensure N_m3u8DL-RE is properly installed and the path in .env is correct.",
+            parse_mode=ParseMode.MARKDOWN
         )
         return
     
@@ -530,8 +563,16 @@ def main():
     application.post_init = post_init
     
     # Run the bot
-    logger.info("Starting bot...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    print("✅ Bot started successfully!")
+    print("📱 You can now interact with your bot on Telegram")
+    print("🔄 Bot is running... Press Ctrl+C to stop")
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except KeyboardInterrupt:
+        print("\n🛑 Bot stopped by user")
+    except Exception as e:
+        print(f"\n❌ Bot crashed: {e}")
+        logger.error(f"Bot crashed: {e}")
 
 
 if __name__ == '__main__':
